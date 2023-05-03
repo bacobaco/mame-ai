@@ -1,0 +1,42 @@
+====> Algorithme Génétique pure lua invaders.lua
+======(population_AG1.txt) max=1170 vitesse=x5
+Taille populations 22 
+parents1&2 selection pondérée
+mutation=0.2
+pour 10 frames par genes (soit 1000 genes max pour un individu)=> 60 générations on obtient 1170pts à la 38ème générations
+
+=====(population_AG2.txt) 98 générations max=1070 vitesse=x5
+taille population 100
+parents1&2 selection pondérée
+mutation=0.1
+pour 1 frames par genes et jusqu'à 10000frames par individus => 
+REMARQUES: après 97générations (30h) ne semble pas s'aventurer vers la droite ne dépasse jamais le milieu du tableau vers
+
+=======(3)
+taille population 100
+parents1 selection pondérée & parent2 selection les meilleurs
+mutation=0.2
+pour 1 frames par genes () et jusqu'à 100000frames par individus
+REMARQUES: ...
+
+=====> Algorithme Double Deep Q Learning/Network (DDQL/DDQN) <======================================
+=======(DDQN1.pth) ~8000 parties/20M de steps, max= 1230, mean= 420  vitesse=x5 17massages/frame_in_game
+hidden network = 50
+learning l=0.01
+gamma=0.99
+episolon => de 1 à 0 *0.99999 eah step (+0.001 si score mean < old score mean pour chaque partie)
+nb de partie [~250 episodes/heure soit ~6000ep/j] = 
+REMARQUES: tir automatique (3 actions:left/right/nop), 
+pas de positions des aliens uniquement player/soucoupe/tir joueur/et bombes (10 entrees)
+semble aller rapidement vers la droite plafonne à 420 après 7000parties
+
+========(DDQN2.pth ~3400parties max=980 mean=192 vitesse=x5 puis max autour x7 après 2500 parties) 
+hidden network = 100
+learning l=0.001
+gamma=0.999
+entrée:10+2 alien de référence en bas à gauche (19messages)
+actions: left,right,nop,tir,tir-left,tir-right 
+epsilon=comme DDQN1.pth
+REMARQUES: bouge beaucoup plus même après 2500 partie mais reste majoritairement vers la droite
+score très mauvais, semble éviter de tirer, quelquefois les aliens descendent jusqu'en bas
+stable autour de 190 après 2000 parties
