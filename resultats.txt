@@ -40,3 +40,10 @@ epsilon=comme DDQN1.pth
 REMARQUES: bouge beaucoup plus même après 2500 partie mais reste majoritairement vers la droite
 score très mauvais, semble éviter de tirer, quelquefois les aliens descendent jusqu'en bas
 stable autour de 190 après 2000 parties
+
+==============================================================================================================
+TESTS MULTIPLES:
+mini 500 parties jusqu'à 5000 partie 
+avec 6 actions double hidden layer 10,50 ou 100 avec ou sans position aliens, rewards -10 ou -100 ou -1000...
+AUCUN résultat probant... tous convergent rapidement autour de 170...
+==============================================================================================================

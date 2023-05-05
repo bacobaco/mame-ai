@@ -5,6 +5,10 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from MameCommSocket import MameCommunicator
+from collections import deque
+
+#Utilisation de plusieurs etats d'entrée
+N = 5 # ou tout autre nombre que vous voulez
 
 # Initialisation socket
 comm = MameCommunicator("localhost", 12345)
@@ -60,14 +64,12 @@ class DQN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(DQN, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, output_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
         self.chemin = "./dqn_invaders_model.pth"
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.fc2(x)
         return x
 
     def sauvegarder_modele(self):
@@ -110,7 +112,7 @@ def executer_action(action):
 
 
 
-def get_reward():
+def get_score():
     response = comm.communicate([f"read_memory {P1ScorL}", f"read_memory {P1ScorM}"])
     if debug:
         print(f"score={response}")
@@ -189,19 +191,25 @@ def main():
     f2_pressed = False
     # Configuration
     # Taille de l'entrée du réseau de neurones (à adapter en fonction de vos besoins)
-    input_size = 10+55*2  # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 1*2 positions tir joueur et 1*2 pos AlienRef
+    input_size = (10+55*2)*N  # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 1*2 positions tir joueur et 1*2 pos AlienRef
     # input_size+= 55*2 #2*55 position des aliens
-    hidden_size = 10  # Taille de la couche cachée
+    hidden_size = 50  # Taille des 2 couches cachées
     output_size = (
         6  # Taille de la sortie du réseau de neurones (nombre d'actions possibles)
     )
-
-    learning_rate = 0.01  # 0.01
-    gamma = 0.99  # 0.99
+    # multiple state
+    state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
+    initial_state = np.zeros(input_size//N)  # un vecteur d'état de taille 120
+    # Remplit le deque avec des vecteurs d'état nuls
+    for _ in range(5):
+        state_history.append(initial_state)
+        
+    learning_rate = 0.0001  # 0.01
+    gamma = 0.9999  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
     epsilon_start = 1
     epsilon_end = 0
-    epsilon_decay = 0.99999
+    epsilon_decay = 0.99999 #0.99999
     epsilon = epsilon_start
     dqn = DQN(input_size, hidden_size, output_size)
     target_dqn = DQN(input_size, hidden_size, output_size)
@@ -217,10 +225,10 @@ def main():
     # 1 pour l'action
     # input_size pour les positions, entrées du DQN
     # et 1 pour le message "wait_for" lui même !
-    NB_DE_DEMANDES_PAR_FRAME = str(10+55 +2+ 2+2+3) #nb entrees+2refalien(uniquement dans le cas de toutes les pos des aliens)+2 alien_alive/dead+2 message pour le score+3 messages-actions
-    sum_of_reward = mean_score = mean_score_old = 0
+    NB_DE_DEMANDES_PAR_FRAME = str((10+55 +2+ 2+2+3)//1) #nb entrees+2refalien(uniquement dans le cas de toutes les pos des aliens)+2 alien_alive/dead+2 message pour le score+3 messages-actions
+    sum_of_score = mean_score = mean_score_old = 0
     # VITESSE DU JEU==================
-    vitesse_de_jeu = 5
+    vitesse_de_jeu = 3
     # VITESSE DU JEU==================
     response = comm.communicate(
         [
@@ -231,7 +239,7 @@ def main():
         ]
     )
     for episode in range(num_episodes):
-        step = 0
+        step = 0 
         if f2_pressed:
             print("Sortie prématurée de la boucle 'for'.")
             break
@@ -241,7 +249,8 @@ def main():
         response = comm.communicate([f"write_memory {numCoins}(1)"])
         while player_alive == 0:
             player_alive = int(comm.communicate([f"read_memory {player1Alive}"])[0])
-        state = get_state()  # Remplacer par l'état initial du jeu
+            
+        state_history.append(get_state()) 
         while player_alive == 1:
             while step == 0:
                 time.sleep(5 / vitesse_de_jeu)  # attendre 5 secondes au début
@@ -256,16 +265,14 @@ def main():
                 debug=False
             elif  keyboard.is_pressed('f4'):
                 debug=True
-        
-                
+
             # Choisir une action en fonction de l'état actuel et de la stratégie epsilon-greedy
-            action = choisir_action(dqn, state, epsilon)
+            state_input = np.concatenate(state_history) # cela aplatira votre historique d'états en un seul vecteur
+            action = choisir_action(dqn, state_input, epsilon) #ATTENTION UTILISTION de plusieurs etat aplatie si N>1
             # Exécuter l'action dans MAME et obtenir la récompense et l'état suivant
             executer_action(action)
             # Remplacer les lignes suivantes par les commandes MameCommunicator appropriées
-            next_state = (
-                get_state()
-            )  # Remplacer par le nouvel état obtenu après l'action
+
             response = comm.communicate(
                 [
                     f"read_memory {playerAlive}",
@@ -275,23 +282,26 @@ def main():
             player_life_end, player_alive = list(
                 map(int, response),
             )
-            reward = get_reward()  # Remplacer par la récompense obtenue après l'action
+            score= get_score()
+            reward = score -step//100 # Remplacer par la récompense obtenue après l'action
             # Mettre à jour le réseau de neurones
-            q_values = dqn(torch.tensor(next_state, dtype=torch.float32))
+            state_history.append(get_state()) #utilisation de plusieurs états
+            state_input = np.concatenate(state_history) # cela aplatira votre historique d'états en un seul vecteur
+            q_values = dqn(torch.tensor(state_input, dtype=torch.float32))
             target_q_values = q_values.clone().detach()
             _, best_action = torch.max(
-                dqn(torch.tensor(next_state, dtype=torch.float32)), 0
+                dqn(torch.tensor(state_input, dtype=torch.float32)), 0
             )
             if player_life_end < 255:
                 response = comm.communicate(["wait_for 0"])
-                target_q_values[action] = reward - 100
-                time.sleep(3 / vitesse_de_jeu)  # attendre 2 seconde
+                target_q_values[action] = -100 #reward-100
+                time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
                 response = comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
             else:
                 target_q_values[action] = (
                     reward
                     + gamma
-                    * target_dqn(torch.tensor(next_state, dtype=torch.float32))[
+                    * target_dqn(torch.tensor(state_input, dtype=torch.float32))[
                         best_action
                     ]
                 )
@@ -299,13 +309,12 @@ def main():
             loss = criterion(q_values, target_q_values)
             loss.backward()
             optimizer.step()
-            state = next_state
             epsilon = max(epsilon * epsilon_decay, epsilon_end)
             step += 1
             # Insérer ici le code pour sauvegarder le modèle, afficher les statistiques, etc.
             if debug:
                 print(
-                    f"action={actions[action]:<10}episode={episode:<10}player_kill={player_life_end:<10}player_end_game={player_alive:<10}reward={reward:<10}nb_mess_step={comm.number_of_messages:<10}\nstate={state}"
+                    f"action={actions[action]:<10}episode={episode:<10}player_kill={player_life_end:<10}player_end_game={player_alive:<10}reward={reward:<10d}nb_mess_step={comm.number_of_messages:<10}nb_step={step:<10}\nstate={state_history}"
                 )
             comm.number_of_messages=0
         response = comm.communicate(["wait_for 0"])
@@ -315,13 +324,13 @@ def main():
             copier_poids(dqn, target_dqn)
         comm.communicate([f'draw_text(25,1,"Game number: {episode+1} - mean score={mean_score} - ba(c)o 2013")'])
         _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sum_of_reward += reward
+        sum_of_score += score
         mean_score_old = mean_score
-        mean_score = round(sum_of_reward / (episode + 1), 2)
+        mean_score = round(sum_of_score / (episode + 1), 2)
         if mean_score_old > mean_score:
             epsilon += 0.001
         print(
-            f"Episodes N°{episode+1} [{_d}][ε={epsilon}][score={reward}][score moyen={mean_score}]"
+            f"Episodes N°{episode+1} [{_d}][ε={epsilon:.4f}][reward={reward:3d}][score={score:3d}][score moyen={mean_score:.2f}]"
         )
     dqn.sauvegarder_modele()
 

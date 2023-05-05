@@ -1,4 +1,4 @@
--- Bridge qui récupére des
+-- Bridge qui rï¿½cupï¿½re des
 --    "execute <command>(<value>)"
 --    "read_memory <address>"
 --    "write_memory <address>(<value>)"
@@ -14,12 +14,12 @@ local mem = cpu.spaces["program"]
 local ioport = machine.ioport
 local in0 = ioport.ports[":CONTP1"]
 local in1 = ioport.ports[":IN1"]
--- Définitions des ports d'entrée MAME (à adapter à votre configuration)
+-- Dï¿½finitions des ports d'entrï¿½e MAME (ï¿½ adapter ï¿½ votre configuration)
 local P1_left = in0.fields["P1 Left"]
 local P1_right = in0.fields["P1 Right"]
 local P1_Button_1 = in0.fields["P1 Button 1"]
 local P1_start = in1.fields["1 Player Start"]
--- Ajoutez d'autres définitions de ports ici si nécessaire
+-- Ajoutez d'autres dï¿½finitions de ports ici si nï¿½cessaire
 
 -------------------SOCKET COMM START
 local socket = require("socket")
@@ -29,7 +29,7 @@ local port = 12345
 local server = assert(socket.bind(host, port))
 local ip, port = server:getsockname()
 assert(ip, port)
-print("Le serveur est en écoute sur le port " .. port)
+print("Le serveur est en ï¿½coute sur le port " .. port)
 server:settimeout(5) -- 5 secondes de timeout
 local client = nil
 
@@ -41,9 +41,9 @@ local function accept_client()
         if new_client then
             client = new_client
             client:settimeout(0) -- mode non bloquant
-            print("Client connecté")
+            print("Client connectï¿½")
         else
-            socket.sleep(0.1) -- Attendre un peu avant de réessayer (évite une utilisation excessive du processeur)
+            socket.sleep(0.1) -- Attendre un peu avant de rï¿½essayer (ï¿½vite une utilisation excessive du processeur)
         end
     end
 end
@@ -60,7 +60,7 @@ local function receive_from_python()
     end
 
     local messages = {}
-    local data, err = client:receive('*l')
+    local data, err = client:receive('*l') 
     while data do
         if data == "__end__" then
             break
@@ -85,7 +85,7 @@ local function execute_command(command, value)
         machine.video.throttle_rate = tonumber(value)
     elseif command == "throttled" then
         machine.video.throttled = tonumber(value)
-        -- ajoutez d'autres commandes ici si nécessaire
+        -- ajoutez d'autres commandes ici si nï¿½cessaire
     else
         print(command, value)
         send_to_python({"ERR: execute_command:" .. command .. " non comprise!"})
