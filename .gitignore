@@ -24,7 +24,11 @@
 /invaders_q.lua
 /json
 /layout
-/lua
+/LISMOI.TXT
+/lua/*
+!/lua/luasocket-3.1.0
+/lua/luasocket-3.1.0/*
+!/lua/luasocket-3.1.0/LISMOI.txt
 /MameCommunicator.py
 /mame_socket_client.lua
 /mime.lua
@@ -46,3 +50,21 @@
 /ui.ini
 /xml
 /__pycache__
+
+# Libraries
+*.lvlibp
+*.llb
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+
+# Metadata
+*.aliases
+*.lvlps
+.cache/

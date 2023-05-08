@@ -1,0 +1,34 @@
+-------------------------------------------------------------------------------------
+COMPILATION DE LUASOCKET pour obtenir core.dll version compatible avec LUA 5.4
+Undispensable pour communiquer avec MAME depuis l'extérieur via les sockets 
+(utile avec un prog Python par exemple et l'utilisation la librairie AI torch)
+-------------------------------------------------------------------------------------
+
+Compiler LUA pour obtenir la lib static de lua indispensable pour compiler luasocket:
+-------------------------------------------------------------------------------------
+(inspiration https://blog.spreendigital.de/2020/05/21/how-to-compile-lua-5-4-0-for-windows/)
+
+-télécharger lua5.4.4  https://www.lua.org/ftp/
+-lancer l'invite x86/x64 de visualstudio (dans le menu demarrer de windows => dossier visual studio)
+-Aller dans src de lua et taper la commande de compilation: cl /MD /O2 /c /DLUA_BUILD_AS_DLL *.c
+-Renomer le fichier luac.obj en luac.o ou autre pour ne pas l'utiliser dans la lib (luac est pour les versions compilés des fichiers scripts lua)
+-Créer la librairie : lib /OUT:lua54.lib *.obj (attention si warning lib possible de luac [version des scripts compilés, pas bon] et pas lua !...)
+
+
+Compiler luasocket pour obtenir core.dll:
+-----------------------------------------
+Mettre dans les proprietes de socket le chemin sur src pour les entete de lua 5.4.4 et sur la bibliotheque lua54.lib de la compilation de lua [chemin précédent src de lua 5.4.4]
+Modifier le fichier lua.props pour indiquer la bonne version de lua.lib version 54
+Regénérer le projet socket
+Placer dans le dossier où se trouve MAME le dossier socket qui vient d'étre créer dans X64
+Placer dans le dossier plugins de MAME le fichier socket.lua (qui appelle "socket.core", donc core.dll) [ce fichier se trouve dans les src de luasocket]
+
+
+Test:
+Aller dans le dossier de MAME lancer mame.exe -console et tapez:
+[MAME]> socket=require"socket"
+[MAME]> print(socket._VERSION)
+LuaSocket 3.0.0
+[MAME]>
+(bizarrement il annonce la version 3.0.0.. "va comprendre charles")
+  

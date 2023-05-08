@@ -1,5 +1,7 @@
 from datetime import datetime
-import time, keyboard, random
+import time, keyboard, random, pygame
+
+pygame.mixer.init()
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,8 +9,9 @@ import numpy as np
 from MameCommSocket import MameCommunicator
 from collections import deque
 
-#Utilisation de plusieurs etats d'entrée
-N = 5 # ou tout autre nombre que vous voulez
+# Utilisation de plusieurs états en entrée du réseau permettant d'avoir un historique
+# cette historique refléterait la dynamique des positions (vitesse)?
+N = 4
 
 # Initialisation socket
 comm = MameCommunicator("localhost", 12345)
@@ -31,8 +34,8 @@ shotSync = "2080"  # Les 3 tirs sont synchronisés avec le minuteur GO-2. Ceci e
 
 alienShotYr = "207B"  # Delta Y du tir alien
 alienShotXr = "207C"  # Delta X du tir alien
-refAlienYr="2009" #Reference alien Yr coordinate
-refAlienXr="200A"#Reference alien Xr coordinate
+refAlienYr = "2009"  # Reference alien Yr coordinate
+refAlienXr = "200A"  # Reference alien Xr coordinate
 rolShotYr = "203D"  # Game object 2: Alien rolling-shot (targets player specifically)
 rolShotXr = "203E"
 squShotYr = "205D"  # Game object 4: squiggly shot position
@@ -55,7 +58,7 @@ playerAlive = (
 player1Alive = "20E7"  # 1 if player is alive, 0 if dead (after last man)
 
 # Liste des actions du jeu demandées au réseau de neurone
-actions = { 0: "left",1: "right",2: "stop",3:"tir",4:"tir-left",5:"tir-right"}
+actions = {0: "left", 1: "right", 2: "stop", 3: "tir", 4: "tir-left", 5: "tir-right"}
 
 import os
 
@@ -98,18 +101,29 @@ def choisir_action(dqn, etat, epsilon):
 
 def executer_action(action):
     if actions[action] == "left":
-        response = comm.communicate(["execute P1_left(1)", "execute P1_right(0)","execute P1_Button_1(0)"])
+        response = comm.communicate(
+            ["execute P1_left(1)", "execute P1_right(0)", "execute P1_Button_1(0)"]
+        )
     elif actions[action] == "right":
-        response = comm.communicate(["execute P1_left(0)", "execute P1_right(1)","execute P1_Button_1(0)"])
+        response = comm.communicate(
+            ["execute P1_left(0)", "execute P1_right(1)", "execute P1_Button_1(0)"]
+        )
     elif actions[action] == "stop":
-        response = comm.communicate(["execute P1_left(0)", "execute P1_right(0)","execute P1_Button_1(0)"])
+        response = comm.communicate(
+            ["execute P1_left(0)", "execute P1_right(0)", "execute P1_Button_1(0)"]
+        )
     elif actions[action] == "tir":
-        response = comm.communicate(["execute P1_left(0)", "execute P1_right(0)","execute P1_Button_1(1)"])
+        response = comm.communicate(
+            ["execute P1_left(0)", "execute P1_right(0)", "execute P1_Button_1(1)"]
+        )
     elif actions[action] == "tir-left":
-        response = comm.communicate(["execute P1_left(1)", "execute P1_right(0)","execute P1_Button_1(1)"])
+        response = comm.communicate(
+            ["execute P1_left(1)", "execute P1_right(0)", "execute P1_Button_1(1)"]
+        )
     elif actions[action] == "tir-right":
-        response = comm.communicate(["execute P1_left(0)", "execute P1_right(1)","execute P1_Button_1(1)"])
-
+        response = comm.communicate(
+            ["execute P1_left(0)", "execute P1_right(1)", "execute P1_Button_1(1)"]
+        )
 
 
 def get_score():
@@ -135,9 +149,6 @@ def get_state():  # sourcery skip: inline-immediately-returned-variable
             f"read_memory {pluShotYr}",
             f"read_memory {squShotXr}",
             f"read_memory {squShotYr}",
-#            f"read_memory {refAlienXr}",
-#            f"read_memory {refAlienYr}",
-            
         ]
     )
     player_pos, psx, psy, saucer_pos, rx, ry, px, py, sx, sy = list(map(int, response))
@@ -153,9 +164,8 @@ def get_state():  # sourcery skip: inline-immediately-returned-variable
             py,
             sx,
             sy,
-#            rax,
-#            ray,
             *extract_alien_coordinates(),
+            *extract_shield_info(),
         ]
     )
     return state
@@ -186,30 +196,38 @@ def extract_alien_coordinates():
     return [element for couple in alien_coordinates for element in couple]
 
 
+def extract_shield_info():
+    messages = []
+    for index in range(
+        0xB0
+    ):  # 2142:21F1	Player 1 shields remembered between rounds 44 bytes * 4 shields ($B0 bytes)
+        shield_info_addr = hex(0x2142 + index)[2:]
+        messages.append(f"read_memory {shield_info_addr}")
+    return list(map(int, comm.communicate(messages)))
+
+
 def main():
     global debug
     f2_pressed = False
-    # Configuration
+    ############################################
+    # Configuration réseaux et hyperparameters #
+    ############################################
     # Taille de l'entrée du réseau de neurones (à adapter en fonction de vos besoins)
-    input_size = (10+55*2)*N  # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 1*2 positions tir joueur et 1*2 pos AlienRef
-    # input_size+= 55*2 #2*55 position des aliens
-    hidden_size = 50  # Taille des 2 couches cachées
-    output_size = (
-        6  # Taille de la sortie du réseau de neurones (nombre d'actions possibles)
-    )
+    # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 1*2 positions tir joueur = 10
+    # 2*55 position des aliens
+    # 176 (0xb0 bytes des shields)
+    input_size = (10 + 55 * 2 + 176) * N
+    hidden_size = 200  # Taille des 2 couches cachées
+    output_size = 6  # nb actions
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
-    initial_state = np.zeros(input_size//N)  # un vecteur d'état de taille 120
-    # Remplit le deque avec des vecteurs d'état nuls
-    for _ in range(5):
-        state_history.append(initial_state)
-        
-    learning_rate = 0.0001  # 0.01
+
+    learning_rate = 0.000001  # 0.01
     gamma = 0.9999  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
     epsilon_start = 1
     epsilon_end = 0
-    epsilon_decay = 0.99999 #0.99999
+    epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
     dqn = DQN(input_size, hidden_size, output_size)
     target_dqn = DQN(input_size, hidden_size, output_size)
@@ -219,27 +237,41 @@ def main():
     copier_poids(dqn, target_dqn)
 
     # nombre d'info ou commandes à exécuter par frame:
-    # 2 pour connaitre l'état du joueur
+    # 2 pour connaître l'état du joueur
     # 2 pour le score
-    # 1 pour le bouton tire
-    # 1 pour l'action
-    # input_size pour les positions, entrées du DQN
+    # 3 pour l'action
+    # récupération des actions: 10 + 2 alien ref + 55 state_aliens + 176 bytes des shields
     # et 1 pour le message "wait_for" lui même !
-    NB_DE_DEMANDES_PAR_FRAME = str((10+55 +2+ 2+2+3)//1) #nb entrees+2refalien(uniquement dans le cas de toutes les pos des aliens)+2 alien_alive/dead+2 message pour le score+3 messages-actions
-    sum_of_score = mean_score = mean_score_old = 0
-    # VITESSE DU JEU==================
+    NB_DE_DEMANDES_PAR_FRAME = str(
+        2 + 2 + 3 + 10 + 2 + 55 + 176
+    )  # nb entrees+2refs alien (uniquement dans le cas de toutes les pos des aliens)+2 alien_alive/dead+2 message pour le score+3 messages-actions
+
+    # ============================ VITESSE DU JEU ======================================================
     vitesse_de_jeu = 3
-    # VITESSE DU JEU==================
+    NB_DE_FRAMES_STEP = 2  # combien de frame pour un step
+    # ============================ VITESSE DU JEU ======================================================
+
+    sum_of_score = mean_score = mean_score_old = 0
     response = comm.communicate(
         [
             f"write_memory {numCoins}(1)",
             "execute P1_start(1)",
             f"execute throttle_rate({vitesse_de_jeu})",
             "execute throttled(0)",
+            f"frame_per_step {NB_DE_FRAMES_STEP}",
         ]
     )
+    print(
+        f"[input layer={input_size}]\
+        [hidden layer={hidden_size}]\
+        [output layer={output_size}]\
+        [gamma={gamma}][learning={learning_rate}]\
+        [epsilon start, end, decay={epsilon},{epsilon_end},{epsilon_decay}]\
+        [nb_mess_frame={NB_DE_DEMANDES_PAR_FRAME}]\
+        [nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]"
+    )
     for episode in range(num_episodes):
-        step = 0 
+        step = 0
         if f2_pressed:
             print("Sortie prématurée de la boucle 'for'.")
             break
@@ -249,8 +281,9 @@ def main():
         response = comm.communicate([f"write_memory {numCoins}(1)"])
         while player_alive == 0:
             player_alive = int(comm.communicate([f"read_memory {player1Alive}"])[0])
-            
-        state_history.append(get_state()) 
+        # Remplit le deque avec des vecteurs d'état non nuls avec le même état de départ...
+        for _ in range(N):
+            state_history.append(get_state())
         while player_alive == 1:
             while step == 0:
                 time.sleep(5 / vitesse_de_jeu)  # attendre 5 secondes au début
@@ -261,14 +294,18 @@ def main():
                 print("Touche 'F2' détectée. Sortie prématurée de la boucle.")
                 f2_pressed = True
                 break
-            if keyboard.is_pressed('ctrl') and keyboard.is_pressed('f4'):
-                debug=False
-            elif  keyboard.is_pressed('f4'):
-                debug=True
+            if keyboard.is_pressed("ctrl") and keyboard.is_pressed("f4"):
+                debug = False
+            elif keyboard.is_pressed("f4"):
+                debug = True
 
             # Choisir une action en fonction de l'état actuel et de la stratégie epsilon-greedy
-            state_input = np.concatenate(state_history) # cela aplatira votre historique d'états en un seul vecteur
-            action = choisir_action(dqn, state_input, epsilon) #ATTENTION UTILISTION de plusieurs etat aplatie si N>1
+            state_input = np.concatenate(
+                state_history
+            )  # cela aplatira votre historique d'états en un seul vecteur
+            action = choisir_action(
+                dqn, state_input, epsilon
+            )  # ATTENTION UTILISTION de plusieurs etat aplatie si N>1
             # Exécuter l'action dans MAME et obtenir la récompense et l'état suivant
             executer_action(action)
             # Remplacer les lignes suivantes par les commandes MameCommunicator appropriées
@@ -282,19 +319,22 @@ def main():
             player_life_end, player_alive = list(
                 map(int, response),
             )
-            score= get_score()
-            reward = score -step//100 # Remplacer par la récompense obtenue après l'action
+            score = get_score()
+            reward = score - step // 50 #step lower reward
             # Mettre à jour le réseau de neurones
-            state_history.append(get_state()) #utilisation de plusieurs états
-            state_input = np.concatenate(state_history) # cela aplatira votre historique d'états en un seul vecteur
+            state_history.append(get_state())  # utilisation de plusieurs états
+            state_input = np.concatenate(
+                state_history
+            )  # cela aplatira votre historique d'états en un seul vecteur
             q_values = dqn(torch.tensor(state_input, dtype=torch.float32))
             target_q_values = q_values.clone().detach()
             _, best_action = torch.max(
                 dqn(torch.tensor(state_input, dtype=torch.float32)), 0
             )
             if player_life_end < 255:
+                reward += -500
                 response = comm.communicate(["wait_for 0"])
-                target_q_values[action] = -100 #reward-100
+                target_q_values[action] = reward  # reward-100
                 time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
                 response = comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
             else:
@@ -314,15 +354,19 @@ def main():
             # Insérer ici le code pour sauvegarder le modèle, afficher les statistiques, etc.
             if debug:
                 print(
-                    f"action={actions[action]:<10}episode={episode:<10}player_kill={player_life_end:<10}player_end_game={player_alive:<10}reward={reward:<10d}nb_mess_step={comm.number_of_messages:<10}nb_step={step:<10}\nstate={state_history}"
+                    f"action={actions[action]:<10}episode={episode:<10}player_kill={player_life_end:<10}player_end_game={player_alive:<10}reward={reward:<10d}nb_mess_step={comm.number_of_messages:<10}nb_step={step:<10}\nstate.dict={dqn.state_dict()}"
                 )
-            comm.number_of_messages=0
+            comm.number_of_messages = 0
         response = comm.communicate(["wait_for 0"])
         if (episode + 1) % 10 == 0:
             print("Sauvegarde du modèle...")
             dqn.sauvegarder_modele()
             copier_poids(dqn, target_dqn)
-        comm.communicate([f'draw_text(25,1,"Game number: {episode+1} - mean score={mean_score} - ba(c)o 2013")'])
+        comm.communicate(
+            [
+                f'draw_text(25,1,"Game number: {episode+1:04d} - mean score={mean_score:04.0f} - ba(c)o 2013")'
+            ]
+        )
         _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sum_of_score += score
         mean_score_old = mean_score
@@ -330,8 +374,10 @@ def main():
         if mean_score_old > mean_score:
             epsilon += 0.001
         print(
-            f"Episodes N°{episode+1} [{_d}][ε={epsilon:.4f}][reward={reward:3d}][score={score:3d}][score moyen={mean_score:.2f}]"
+            f"Episodes N°{episode+1} [nb steps={step:4d}][{_d}][ε={epsilon:.4f}][reward={reward:3d}][score={score:3d}][score moyen={mean_score:.2f}]"
         )
+        if mean_score < 100:
+            pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
     dqn.sauvegarder_modele()
 
 
