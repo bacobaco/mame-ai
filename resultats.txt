@@ -46,4 +46,8 @@ TESTS MULTIPLES:
 mini 500 parties jusqu'à 5000 partie 
 avec 6 actions double hidden layer 10,50 ou 100 avec ou sans position aliens, rewards -10 ou -100 ou -1000...
 AUCUN résultat probant... tous convergent rapidement autour de 170...
+
+Autre essai avec les infos des 4 shields, une frame sur deux, 4 historic en entrées,
+ rewards (score -step//50-500 et par lives) (>1700 entrees):
+ 5000 parties 10Mframes on game zéro resultat
 ==============================================================================================================

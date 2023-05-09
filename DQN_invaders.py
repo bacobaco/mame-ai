@@ -1,5 +1,5 @@
 from datetime import datetime
-import time, keyboard, random, pygame
+import time, keyboard, random, pygame, os
 
 pygame.mixer.init()
 import torch
@@ -50,7 +50,7 @@ playerXr = "201B"  # 	Descripteur de sprite du joueur ... position MSB
 plyrShotStatus = "2025"  # 0 if available, 1 if just initiated, 2 moving normally, 3 hit something besides alien, 5 if alien explosion is in progress, 4 if alien has exploded (remove from active duty)
 obj1CoorYr = "2029"  # 	Player shot Y coordinate
 obj1CoorXr = "202A"  # 	Player shot X coordinate
-p1ShipsRem = "21FF"  # 		Ships remaining after current dies
+p1ShipsRem = "21FF"  # 	Ships remaining after current dies
 gameMode = "20EF"
 playerAlive = (
     "2015"  # Player is alive [FF=alive]. Toggles between 0 and 1 for blow-up images.
@@ -60,7 +60,25 @@ player1Alive = "20E7"  # 1 if player is alive, 0 if dead (after last man)
 # Liste des actions du jeu demandées au réseau de neurone
 actions = {0: "left", 1: "right", 2: "stop", 3: "tir", 4: "tir-left", 5: "tir-right"}
 
-import os
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+
+    def push(self, state, action, reward, next_state, done):
+        state = np.expand_dims(state, 0)
+        next_state = np.expand_dims(next_state, 0)
+
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size):
+        state, action, reward, next_state, done = zip(
+            *random.sample(self.buffer, batch_size)
+        )
+        return np.concatenate(state), action, reward, np.concatenate(next_state), done
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 class DQN(nn.Module):
@@ -135,7 +153,7 @@ def get_score():
     return (P1ScorL_v >> 4) * 10 + (P1ScorM_v & 0x0F) * 100 + ((P1ScorM_v) >> 4) * 1000
 
 
-def get_state():  # sourcery skip: inline-immediately-returned-variable
+def get_state():
     # Lire les informations de la mémoire du jeu position du player et soucoupe
     response = comm.communicate(
         [
@@ -152,7 +170,7 @@ def get_state():  # sourcery skip: inline-immediately-returned-variable
         ]
     )
     player_pos, psx, psy, saucer_pos, rx, ry, px, py, sx, sy = list(map(int, response))
-    state = np.array(
+    return np.array(
         [
             player_pos,
             psx,
@@ -168,7 +186,6 @@ def get_state():  # sourcery skip: inline-immediately-returned-variable
             *extract_shield_info(),
         ]
     )
-    return state
 
 
 def extract_alien_coordinates():
@@ -210,7 +227,7 @@ def main():
     global debug
     f2_pressed = False
     ############################################
-    # Configuration réseaux et hyperparameters #
+    # Configuration réseaux et hyperparameter  #
     ############################################
     # Taille de l'entrée du réseau de neurones (à adapter en fonction de vos besoins)
     # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 1*2 positions tir joueur = 10
@@ -222,19 +239,24 @@ def main():
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
 
-    learning_rate = 0.000001  # 0.01
-    gamma = 0.9999  # 0.99
+    learning_rate = 0.00001  # 0.01
+    gamma = 0.999  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
     epsilon_start = 1
     epsilon_end = 0
     epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
+
     dqn = DQN(input_size, hidden_size, output_size)
     target_dqn = DQN(input_size, hidden_size, output_size)
     optimizer = optim.Adam(dqn.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
     dqn.charger_modele()
     copier_poids(dqn, target_dqn)
+
+    buffer_capacity = 10000  # Adjust based on your needs
+    batch_size = 64  # Adjust based on your needs
+    replay_buffer = ReplayBuffer(buffer_capacity)
 
     # nombre d'info ou commandes à exécuter par frame:
     # 2 pour connaître l'état du joueur
@@ -262,13 +284,13 @@ def main():
         ]
     )
     print(
-        f"[input layer={input_size}]\
-        [hidden layer={hidden_size}]\
-        [output layer={output_size}]\
-        [gamma={gamma}][learning={learning_rate}]\
-        [epsilon start, end, decay={epsilon},{epsilon_end},{epsilon_decay}]\
-        [nb_mess_frame={NB_DE_DEMANDES_PAR_FRAME}]\
-        [nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]"
+        f"[input layer={input_size}]"
+        f"[hidden layer={hidden_size}]"
+        f"[output layer={output_size}]"
+        f"[gamma={gamma}][learning={learning_rate}]"
+        f"[epsilon start, end, decay={epsilon},{epsilon_end},{epsilon_decay}]"
+        f"[nb_mess_frame={NB_DE_DEMANDES_PAR_FRAME}]"
+        f"[nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]"
     )
     for episode in range(num_episodes):
         step = 0
@@ -284,6 +306,7 @@ def main():
         # Remplit le deque avec des vecteurs d'état non nuls avec le même état de départ...
         for _ in range(N):
             state_history.append(get_state())
+        state = np.concatenate(state_history)
         while player_alive == 1:
             while step == 0:
                 time.sleep(5 / vitesse_de_jeu)  # attendre 5 secondes au début
@@ -298,59 +321,90 @@ def main():
                 debug = False
             elif keyboard.is_pressed("f4"):
                 debug = True
+            player_life_end, player_alive = list(
+                map(
+                    int,
+                    comm.communicate(
+                        [
+                            f"read_memory {playerAlive}",
+                            f"read_memory {player1Alive}",
+                        ]
+                    ),
+                )
+            )
 
             # Choisir une action en fonction de l'état actuel et de la stratégie epsilon-greedy
-            state_input = np.concatenate(
-                state_history
-            )  # cela aplatira votre historique d'états en un seul vecteur
-            action = choisir_action(
-                dqn, state_input, epsilon
-            )  # ATTENTION UTILISTION de plusieurs etat aplatie si N>1
+            action = choisir_action(dqn, state, epsilon)
             # Exécuter l'action dans MAME et obtenir la récompense et l'état suivant
             executer_action(action)
-            # Remplacer les lignes suivantes par les commandes MameCommunicator appropriées
-
-            response = comm.communicate(
-                [
-                    f"read_memory {playerAlive}",
-                    f"read_memory {player1Alive}",
-                ]
-            )
-            player_life_end, player_alive = list(
-                map(int, response),
-            )
             score = get_score()
-            reward = score - step // 50 #step lower reward
-            # Mettre à jour le réseau de neurones
-            state_history.append(get_state())  # utilisation de plusieurs états
-            state_input = np.concatenate(
-                state_history
-            )  # cela aplatira votre historique d'états en un seul vecteur
-            q_values = dqn(torch.tensor(state_input, dtype=torch.float32))
-            target_q_values = q_values.clone().detach()
-            _, best_action = torch.max(
-                dqn(torch.tensor(state_input, dtype=torch.float32)), 0
-            )
+            reward = score - step // 50  # step lower reward
             if player_life_end < 255:
                 reward += -500
                 response = comm.communicate(["wait_for 0"])
-                target_q_values[action] = reward  # reward-100
                 time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
                 response = comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
-            else:
-                target_q_values[action] = (
-                    reward
-                    + gamma
-                    * target_dqn(torch.tensor(state_input, dtype=torch.float32))[
-                        best_action
-                    ]
-                )
-            optimizer.zero_grad()
-            loss = criterion(q_values, target_q_values)
-            loss.backward()
-            optimizer.step()
+            # Mettre à jour le réseau de neurones
+            state_history.append(get_state())  # utilisation de plusieurs états
+            next_state = np.concatenate(state_history)  # un seul vecteur aplatit
+            done = player_alive == 0
+            replay_buffer.push(state, action, reward, next_state, done)
+            state = next_state
             epsilon = max(epsilon * epsilon_decay, epsilon_end)
+            
+            if len(replay_buffer) > batch_size:
+                state_batch, action_batch, reward_batch, next_state_batch, done_batch = replay_buffer.sample(batch_size)
+                if debug:print(state_batch, action_batch, reward_batch, next_state_batch, done_batch)
+                # Convert to tensors
+                state_batch = torch.tensor(state_batch, dtype=torch.float32)
+                action_batch = torch.tensor(action_batch, dtype=torch.int64)
+                reward_batch = torch.tensor(reward_batch, dtype=torch.float32)
+                next_state_batch = torch.tensor(next_state_batch, dtype=torch.float32)
+                done_batch = torch.tensor(done_batch, dtype=torch.float32)
+
+                # Current Q Values
+                curr_q_values = dqn(state_batch).gather(1, action_batch.unsqueeze(-1)).squeeze(-1)
+                # Calculate target Q Values
+                next_q_values = target_dqn(next_state_batch).max(1)[0].detach()
+                # Compute target of Q values
+                target_q_values = reward_batch + gamma * (1 - done_batch) * next_q_values
+                # Compute loss
+                loss = criterion(curr_q_values, target_q_values)
+                # Optimize the model
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            
+            ################old without replay
+            # q_values = dqn(torch.tensor(next_state, dtype=torch.float32))
+            # target_q_values = q_values.clone().detach()
+            # _, best_action = torch.max(
+            #     dqn(torch.tensor(next_state, dtype=torch.float32)), 0
+            # )
+            # if player_life_end < 255:
+            #     reward += -500
+            #     response = comm.communicate(["wait_for 0"])
+            #     target_q_values[action] = reward
+            #     time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
+            #     response = comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
+            # else:
+            #     target_q_values[action] = (
+            #         reward
+            #         + gamma
+            #         * target_dqn(torch.tensor(next_state, dtype=torch.float32))[
+            #             best_action
+            #         ]
+            #     )
+            # optimizer.zero_grad()
+            # loss = criterion(q_values, target_q_values)
+            # loss.backward()
+            # optimizer.step()
+            # epsilon = max(epsilon * epsilon_decay, epsilon_end)
+            #######################
+            
             step += 1
+
             # Insérer ici le code pour sauvegarder le modèle, afficher les statistiques, etc.
             if debug:
                 print(
@@ -376,7 +430,7 @@ def main():
         print(
             f"Episodes N°{episode+1} [nb steps={step:4d}][{_d}][ε={epsilon:.4f}][reward={reward:3d}][score={score:3d}][score moyen={mean_score:.2f}]"
         )
-        if mean_score < 100:
+        if mean_score == mean_score_old:
             pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
     dqn.sauvegarder_modele()
 
