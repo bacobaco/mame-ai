@@ -23,7 +23,6 @@ MAX_BOMB_POS_X = 255
 MAX_BOMB_POS_Y = 255
 ACTION_DELAY = 0.01
 debug = False
-flag_tir = True
 
 # Adresses du jeu space invaders
 # https://www.computerarcheology.com/Arcade/SpaceInvaders/RAMUse.html
@@ -146,10 +145,7 @@ def executer_action(action):
 
 def get_score():
     response = comm.communicate([f"read_memory {P1ScorL}", f"read_memory {P1ScorM}"])
-    if debug:
-        print(f"score={response}")
     P1ScorL_v, P1ScorM_v = list(map(int, response))
-
     return (P1ScorL_v >> 4) * 10 + (P1ScorM_v & 0x0F) * 100 + ((P1ScorM_v) >> 4) * 1000
 
 
@@ -225,7 +221,6 @@ def extract_shield_info():
 
 def main():
     global debug
-    f2_pressed = False
     ############################################
     # Configuration réseaux et hyperparameter  #
     ############################################
@@ -239,13 +234,15 @@ def main():
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
 
-    learning_rate = 0.00001  # 0.01
-    gamma = 0.999  # 0.99
+    learning_rate = 0.001  # 0.01
+    gamma = 0.99  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
-    epsilon_start = 1
+    epsilon_start = 0.05
     epsilon_end = 0
     epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
+    reward_kill=-500
+    reward_mult_step=-0.02
 
     dqn = DQN(input_size, hidden_size, output_size)
     target_dqn = DQN(input_size, hidden_size, output_size)
@@ -274,6 +271,7 @@ def main():
     # ============================ VITESSE DU JEU ======================================================
 
     sum_of_score = mean_score = mean_score_old = 0
+    f2_pressed = False
     response = comm.communicate(
         [
             f"write_memory {numCoins}(1)",
@@ -338,9 +336,9 @@ def main():
             # Exécuter l'action dans MAME et obtenir la récompense et l'état suivant
             executer_action(action)
             score = get_score()
-            reward = score - step // 50  # step lower reward
+            reward = score + step * reward_mult_step # step lower reward
             if player_life_end < 255:
-                reward += -500
+                reward += reward_kill
                 response = comm.communicate(["wait_for 0"])
                 time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
                 response = comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
@@ -351,10 +349,23 @@ def main():
             replay_buffer.push(state, action, reward, next_state, done)
             state = next_state
             epsilon = max(epsilon * epsilon_decay, epsilon_end)
-            
+            step += 1
             if len(replay_buffer) > batch_size:
-                state_batch, action_batch, reward_batch, next_state_batch, done_batch = replay_buffer.sample(batch_size)
-                if debug:print(state_batch, action_batch, reward_batch, next_state_batch, done_batch)
+                (
+                    state_batch,
+                    action_batch,
+                    reward_batch,
+                    next_state_batch,
+                    done_batch,
+                ) = replay_buffer.sample(batch_size)
+                if debug:
+                    print(
+                        state_batch,
+                        action_batch,
+                        reward_batch,
+                        next_state_batch,
+                        done_batch,
+                    )
                 # Convert to tensors
                 state_batch = torch.tensor(state_batch, dtype=torch.float32)
                 action_batch = torch.tensor(action_batch, dtype=torch.int64)
@@ -363,52 +374,25 @@ def main():
                 done_batch = torch.tensor(done_batch, dtype=torch.float32)
 
                 # Current Q Values
-                curr_q_values = dqn(state_batch).gather(1, action_batch.unsqueeze(-1)).squeeze(-1)
+                curr_q_values = (
+                    dqn(state_batch).gather(1, action_batch.unsqueeze(-1)).squeeze(-1)
+                )
                 # Calculate target Q Values
                 next_q_values = target_dqn(next_state_batch).max(1)[0].detach()
                 # Compute target of Q values
-                target_q_values = reward_batch + gamma * (1 - done_batch) * next_q_values
+                target_q_values = (
+                    reward_batch + gamma * (1 - done_batch) * next_q_values
+                )
                 # Compute loss
                 loss = criterion(curr_q_values, target_q_values)
                 # Optimize the model
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
-            
-            ################old without replay
-            # q_values = dqn(torch.tensor(next_state, dtype=torch.float32))
-            # target_q_values = q_values.clone().detach()
-            # _, best_action = torch.max(
-            #     dqn(torch.tensor(next_state, dtype=torch.float32)), 0
-            # )
-            # if player_life_end < 255:
-            #     reward += -500
-            #     response = comm.communicate(["wait_for 0"])
-            #     target_q_values[action] = reward
-            #     time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
-            #     response = comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
-            # else:
-            #     target_q_values[action] = (
-            #         reward
-            #         + gamma
-            #         * target_dqn(torch.tensor(next_state, dtype=torch.float32))[
-            #             best_action
-            #         ]
-            #     )
-            # optimizer.zero_grad()
-            # loss = criterion(q_values, target_q_values)
-            # loss.backward()
-            # optimizer.step()
-            # epsilon = max(epsilon * epsilon_decay, epsilon_end)
-            #######################
-            
-            step += 1
-
             # Insérer ici le code pour sauvegarder le modèle, afficher les statistiques, etc.
             if debug:
                 print(
-                    f"action={actions[action]:<10}episode={episode:<10}player_kill={player_life_end:<10}player_end_game={player_alive:<10}reward={reward:<10d}nb_mess_step={comm.number_of_messages:<10}nb_step={step:<10}\nstate.dict={dqn.state_dict()}"
+                    f"action={actions[action]:<10}episode={episode:<10}player_kill={player_life_end:<10}player_end_game={player_alive:<10}reward={reward:<10d}nb_mess_step={comm.number_of_messages:<10}nb_step={step:<10}"
                 )
             comm.number_of_messages = 0
         response = comm.communicate(["wait_for 0"])

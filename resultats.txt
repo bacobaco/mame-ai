@@ -43,11 +43,19 @@ stable autour de 190 après 2000 parties
 
 ==============================================================================================================
 TESTS MULTIPLES:
-mini 500 parties jusqu'à 5000 partie 
 avec 6 actions double hidden layer 10,50 ou 100 avec ou sans position aliens, rewards -10 ou -100 ou -1000...
 AUCUN résultat probant... tous convergent rapidement autour de 170...
-
 Autre essai avec les infos des 4 shields, une frame sur deux, 4 historic en entrées,
  rewards (score -step//50-500 et par lives) (>1700 entrees):
  5000 parties 10Mframes on game zéro resultat
-==============================================================================================================
+===============================================================================================================
+Ajout de ReplayBuffer:
+=======================
+[input layer=1184][hidden layer=200][output layer=6][gamma=0.999][learning=1e-05][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
+=> 2200+300parties => converge vers 180pts (d31.pth)
+
+[input layer=1184][hidden layer=200][output layer=6][gamma=0.99][learning=0.01][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
+=>300 parties => reste sur la droite converge incertaine (255pts en décroissance après 300 parties epsilon=0.096) (d32.pth)
+
+[input layer=1184][hidden layer=200][output layer=6][gamma=0.99][learning=0.001][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
+=>
