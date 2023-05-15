@@ -110,10 +110,12 @@ local x, y, _str = 40, 10, ""
 local function main()
     frame = frame + 1
     if frame % 10000 == 0 then
-        print("all frames:" .. frame .. " - " .. "frames_in_game:" .. frame_in_game .. " - " ..
-                  tostring(nb_messages_total_in_game) .. " messages traites soit " ..
-                  tostring(nb_messages_total_in_game * 100 // frame_in_game / 100) .. " asks/frame_in_game " .. "[" ..
-                  tostring(nb_messages_total_in_game * 100 // frame / 100) .. "/frame]")
+        print(
+            "[" .. os.date() .. "]" .. "all frames:" .. frame .. " - " .. "frames_in_game:" .. frame_in_game .. " - " ..
+                tostring(nb_messages_total_in_game) .. " messages traites soit " ..
+                tostring(nb_messages_total_in_game * 100 // frame_in_game / 100) .. " asks/frame_in_game " .. "[" ..
+                tostring(nb_messages_total_in_game * 100 // frame / 100) .. "/frame]" .. " (frame_per_step=" ..
+                tostring(frame_per_step) .. ")")
     end
     if frame % frame_per_step == 0 then
         local messages_in_game = 0
@@ -133,7 +135,7 @@ local function main()
                     elseif message_from_python:find("write_memory") then
                         local address, value = message_from_python:match("write_memory ([%w_]+)%((%d+)%)")
                         local memory_value = write_memory_value(tonumber(address, 16), tonumber(value))
-                        table.insert(responses, "Write "..address.."="..value.." ack")
+                        table.insert(responses, "Write " .. address .. "=" .. value .. " ack")
                     elseif message_from_python:find("draw_text") then
                         x, y, _str = message_from_python:match("draw_text%((%d+),(%d+),\"([^\"]+)\"%)")
                         table.insert(responses, "draw_text command ack")

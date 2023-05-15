@@ -19,6 +19,8 @@ mutation=0.2
 pour 1 frames par genes () et jusqu'à 100000frames par individus
 REMARQUES: ...
 
+
+
 =====> Algorithme Double Deep Q Learning/Network (DDQL/DDQN) <======================================
 =======(DDQN1.pth) ~8000 parties/20M de steps, max= 1230, mean= 420  vitesse=x5 17massages/frame_in_game
 hidden network = 50
@@ -52,10 +54,48 @@ Autre essai avec les infos des 4 shields, une frame sur deux, 4 historic en entr
 Ajout de ReplayBuffer:
 =======================
 [input layer=1184][hidden layer=200][output layer=6][gamma=0.999][learning=1e-05][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
-=> 2200+300parties => converge vers 180pts (d31.pth)
+==> 2200+300parties => converge vers 180pts (d31.pth)
 
 [input layer=1184][hidden layer=200][output layer=6][gamma=0.99][learning=0.01][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
-=>300 parties => reste sur la droite converge incertaine (255pts en décroissance après 300 parties epsilon=0.096) (d32.pth)
+==>300 parties => reste sur la droite converge incertaine (255pts en décroissance après 300 parties epsilon=0.096) (d32.pth)
 
 [input layer=1184][hidden layer=200][output layer=6][gamma=0.99][learning=0.001][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
-=>
+==>3500 parties => converge rapidement après 500 parties vers 129pts... bouge bien mais peu de tir ne semble rien apprendre... (d33pth)
+
+[input layer=1184][nb hidden layer=2][hidden layer=33][output layer=6][gamma=0.99][learning=0.001][epsilon start, end, decay=1,0,0.99999][nb_mess_frame=250][nb_step_frame=2][speed=3]
+==>900 parties (impossible de redémarrer après?) en décroissance jusqu'à 188pts bouger bien mais en décroissance et après redémarrage semblait rester sur la gauche...
+
+[input=296*3=888][hidden=22*3#10648][output=6][gamma=0.999][learning=0.001][epsilon start, end, decay=1,0,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=251][nb_step_frame=3][speed=3]
+[calcul de reward avec shootstatus et -1000 pour un kill et +0.02 par step]
+==>Apres 800 parties 188pts en décroissance lente... reste sur les cotés... (d35.pth)
+
+[input=296*3=888][hidden=22*3#10648][output=6][gamma=0.999][learning=0.001][epsilon start, end, decay=0.1,0,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=251][nb_step_frame=3][speed=3]
+==>Après 2500 parties se retrouve à droite converge vers 141pts (129pts après relance d36.pth)
+
+[input=296*3=888][hidden=50*2#2500][output=6][gamma=0.9999999][learning=1e-07][epsilon start, end, decay=1,0,0.99999][Replay_size=5000&_samples=500][nb_mess_frame=251][nb_step_frame=1][speed=3][reward_kill = -1000][reward_mult_step = -0.02]
+==> après 500 ne tire presque plus peu de déplacement (en décroissance et converge? vers 171pts d37.pth)
+
+[input=296*5=1480][hidden=10*2#100][output=6][gamma=0.9999999][learning=1e-07][reward_kill=-1000][reward_step=-0.02][epsilon start, end, decay=0.94,0,0.99999][Replay_size=5000&_samples=500][nb_mess_frame=251][nb_step_frame=5][speed=5]
+==> Après 700 partie décroissance convergence? vers 180pts d38.pth
+
+[input=296*2=592][hidden=50*1#50][output=6][gamma=0.9999999][learning=1e-07][reward_kill=-1000][reward_step=-0.02][epsilon start, end, decay=1,0,0.99999][Replay_size=5000&_samples=500][nb_mess_frame=251][nb_step_frame=4][speed=1]
+==> après 3500 parties converge vers 76pts! bouge bien tir peu... (d39.pth)
+
+[input=296*3=888][hidden=500*1#500][output=6][gamma=0.9999999][learning=1e-07][reward_kill=-1000][reward_step=-0.02][epsilon start, end, decay=1,0,0.99999][Replay_size=5000&_samples=500][nb_mess_frame=251][nb_step_frame=3][speed=5]
+==> lent, 190pts après 600 parties puis on met le reward_step=-1 et epsilon=0.09 => converge 76pts et reste sur la gauche après 250 parties... relance avec reward_step=1 => 76pts convergence  (d310.pth)
+
+[input=296*2=592][hidden=500*1#500][output=6][gamma=0.99][learning=0.01][reward_kill=-2000][reward_step=-0.1][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=251][nb_step_frame=3][speed=5]
+4000 parties => convergence décroissance lente 127pts... relance pour 1000 parties convergence stricte vers 94pts... (d311.pth)
+
+[input=296*2=592][hidden=500*1#500][output=6][gamma=0.999][learning=0.001][reward_kill=-200][reward_step=0.05][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=251][nb_step_frame=3][speed=5]
+1500 parties => reste souvent à gauche tir peu décroissance lente convergente? 178pts... (d312.pth)
+
+[input=296*2=592][hidden=500*1#500][output=6][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=251][nb_step_frame=3][speed=5]
+après 4000 parties, semble rester à droite converge vers 127 pts ou moins... relance 2000parties => 87pts (micro décroissance), je relance 300 partie 107pts e décroissance //
+
+
+=====================================================================
+teste la simplicité uniquement 12 entrees et 2 action tir continue,
+N=1, je garde epsilon, gama=0.99 et learn=0.01 et toutes les frames,
+je garde les rewards avec step+1, kill-2000 et shotstatus
+je garde replay buffer 2000 de capacité 100 de renforcement par step

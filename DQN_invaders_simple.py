@@ -20,6 +20,7 @@ MAX_BOMB_POS_X = 255
 MAX_BOMB_POS_Y = 255
 ACTION_DELAY = 0.01
 debug = 0
+flag_tir = True
 
 # Adresses du jeu space invaders
 # https://www.computerarcheology.com/Arcade/SpaceInvaders/RAMUse.html
@@ -54,7 +55,10 @@ playerAlive = (
 player1Alive = "20E7"  # 1 if player is alive, 0 if dead (after last man)
 
 # Liste des actions du jeu demandées au réseau de neurone
-actions = {0: "left", 1: "right", 2: "stop", 3: "tir", 4: "tir-left", 5: "tir-right"}
+actions = {
+    0: "left",
+    1: "right",
+}  # , 2: "stop", 3: "tir", 4: "tir-left", 5: "tir-right"}
 
 
 class ReplayBuffer:
@@ -87,7 +91,7 @@ class DQN(nn.Module):
             nn.Linear(hidden_size, hidden_size) for _ in range(self.n)
         )
         self.fc_output = nn.Linear(hidden_size, output_size)
-        self.chemin = "./dqn_invaders_model.pth"
+        self.chemin = "./dqn_invaders_model_simple.pth"
 
     def forward(self, x):
         x = torch.relu(self.fc_input(x))
@@ -121,30 +125,16 @@ def choisir_action(dqn, etat, epsilon):
 
 
 def executer_action(action):
+    global flag_tir
     if actions[action] == "left":
-        response = comm.communicate(
-            ["execute P1_left(1)", "execute P1_right(0)", "execute P1_Button_1(0)"]
-        )
+        response = comm.communicate(["execute P1_left(1)", "execute P1_right(0)"])
     elif actions[action] == "right":
-        response = comm.communicate(
-            ["execute P1_left(0)", "execute P1_right(1)", "execute P1_Button_1(0)"]
-        )
-    elif actions[action] == "stop":
-        response = comm.communicate(
-            ["execute P1_left(0)", "execute P1_right(0)", "execute P1_Button_1(0)"]
-        )
-    elif actions[action] == "tir":
-        response = comm.communicate(
-            ["execute P1_left(0)", "execute P1_right(0)", "execute P1_Button_1(1)"]
-        )
-    elif actions[action] == "tir-left":
-        response = comm.communicate(
-            ["execute P1_left(1)", "execute P1_right(0)", "execute P1_Button_1(1)"]
-        )
-    elif actions[action] == "tir-right":
-        response = comm.communicate(
-            ["execute P1_left(0)", "execute P1_right(1)", "execute P1_Button_1(1)"]
-        )
+        response = comm.communicate(["execute P1_left(0)", "execute P1_right(1)"])
+    if flag_tir:
+        comm.communicate(["execute P1_Button_1(1)"])
+    else:
+        comm.communicate(["execute P1_Button_1(0)"])
+    flag_tir = not flag_tir
 
 
 def get_score():
@@ -183,9 +173,13 @@ def get_state():
             f"read_memory {pluShotYr}",
             f"read_memory {squShotXr}",
             f"read_memory {squShotYr}",
+            f"read_memory {refAlienXr}",
+            f"read_memory {refAlienYr}",
         ]
     )
-    player_pos, psx, psy, saucer_pos, rx, ry, px, py, sx, sy = list(map(int, response))
+    player_pos, psx, psy, saucer_pos, rx, ry, px, py, sx, sy, ax, ay = list(
+        map(int, response)
+    )
     return np.array(
         [
             player_pos,
@@ -198,15 +192,18 @@ def get_state():
             py,
             sx,
             sy,
-            *extract_alien_coordinates(),
-            *extract_shield_info(),
+            ax,
+            ay,
+            # *extract_alien_coordinates(),
+            # *extract_shield_info(),
         ]
     )
 
 
+# non utilisé uniquement position de l'alien en bas à gauche
 def extract_alien_coordinates():
     alien_coordinates = []
-    messages = ["read_memory 2009", "read_memory 200A"]
+    messages = [f"read_memory {refAlienYr}", f"read_memory {refAlienXr}"]
     for index in range(55):
         # Check if the alien is alive
         alive_flag_addr = hex(0x2100 + index)[2:]
@@ -229,6 +226,7 @@ def extract_alien_coordinates():
     return [element for couple in alien_coordinates for element in couple]
 
 
+# non utilisé
 def extract_shield_info():
     messages = []
     for index in range(
@@ -242,25 +240,23 @@ def extract_shield_info():
 def main():
     # Utilisation de plusieurs états en entrée du réseau permettant d'avoir un historique
     # cette historique refléterait la dynamique des positions (vitesse)?
-    N = 2
+    N = 1
     global debug
     ############################################
     # Configuration réseaux et hyperparameter  #
     ############################################
     # Taille de l'entrée du réseau de neurones (à adapter en fonction de vos besoins)
-    # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 1*2 positions tir joueur = 10
-    # 2*55 position des aliens
-    # 176 (0xb0 bytes des shields)
-    input_size = (10 + 55 * 2 + 176) * N
+    # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 2 positions tir joueur + 2 pour ref_alien
+    input_size = (10 + 2) * N
     nb_hidden_layer = 1
     hidden_size = 500
-    output_size = 6  # nb actions
+    output_size = 2  # nb actions
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
     learning_rate = 0.001  # 0.01
     gamma = 0.999  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
-    epsilon_start = 0.1
+    epsilon_start = 1
     epsilon_end = 0
     epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
@@ -281,16 +277,16 @@ def main():
     # nombre d'info ou commandes à exécuter par frame:
     # 2 pour connaître l'état du joueur
     # 3 pour calcul score 2 pour score et un pour status shot
-    # 3 pour l'action
-    # récupération des actions: 10 + 2 alien ref + 55 state_aliens + 176 bytes des shields
+    # 2 pour l'action (left ou right plus tir)
+    # récupération des actions: 10 + 2 alien ref
     # et 1 pour le message "wait_for" lui même !
     NB_DE_DEMANDES_PAR_FRAME = str(
-        2 + 3 + 3 + 10 + 2 + 55 + 176
-    )  # nb entrees+2refs alien (uniquement dans le cas de toutes les pos des aliens)+2 alien_alive/dead+2 message pour le score+3 messages-actions
+        2 + 3 + 2 + 10 + 2
+    ) 
 
     # ============================ VITESSE DU JEU ======================================================
-    vitesse_de_jeu = 5
-    NB_DE_FRAMES_STEP = 3  # combien de frame pour un step
+    vitesse_de_jeu = 3
+    NB_DE_FRAMES_STEP = 1  # combien de frame pour un step
     # ============================ VITESSE DU JEU ======================================================
 
     sum_of_score = mean_score = mean_score_old = 0
