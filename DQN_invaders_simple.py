@@ -1,13 +1,15 @@
 from datetime import datetime
+import shutil
 import time, keyboard, random, pygame, os
 
-pygame.mixer.init()
+pygame.mixer.init()  # pour le son au cas où mean_score est stable
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from MameCommSocket import MameCommunicator
 from collections import deque
+from MameCommSocket import MameCommunicator
+from ScreenRecorder import ScreenRecorder
 
 
 # Initialisation socket
@@ -249,19 +251,19 @@ def main():
     # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 2 positions tir joueur + 2 pour ref_alien
     input_size = (10 + 2) * N
     nb_hidden_layer = 1
-    hidden_size = 500
+    hidden_size = 300
     output_size = 2  # nb actions
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
-    learning_rate = 0.001  # 0.01
-    gamma = 0.999  # 0.99
+    learning_rate = 0.01  # 0.01
+    gamma = 0.99  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
-    epsilon_start = 1
+    epsilon_start = 0.9
     epsilon_end = 0
     epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
     reward_alive = +1
-    reward_kill = -2000
+    reward_kill = -1000
     reward_mult_step = +0.01
     dqn = DQN(input_size, hidden_size, output_size, nb_hidden_layer)
     target_dqn = DQN(input_size, hidden_size, output_size, nb_hidden_layer)
@@ -270,8 +272,8 @@ def main():
     dqn.charger_modele()
     copier_poids(dqn, target_dqn)
 
-    buffer_capacity = 2000  # autour de 1 episodes
-    batch_size = 100  # autour d'un 1/20 episodes
+    buffer_capacity = 200  # autour de 1 episode(s)
+    batch_size = 20  # autour d'un 1/10 episode(s)
     replay_buffer = ReplayBuffer(buffer_capacity)
 
     # nombre d'info ou commandes à exécuter par frame:
@@ -280,16 +282,16 @@ def main():
     # 2 pour l'action (left ou right plus tir)
     # récupération des actions: 10 + 2 alien ref
     # et 1 pour le message "wait_for" lui même !
-    NB_DE_DEMANDES_PAR_FRAME = str(
-        2 + 3 + 2 + 10 + 2
-    ) 
+    NB_DE_DEMANDES_PAR_FRAME = str(2 + 3 + 2 + 10 + 2 + 1)
 
     # ============================ VITESSE DU JEU ======================================================
-    vitesse_de_jeu = 3
-    NB_DE_FRAMES_STEP = 1  # combien de frame pour un step
-    # ============================ VITESSE DU JEU ======================================================
-
-    sum_of_score = mean_score = mean_score_old = 0
+    vitesse_de_jeu = 9
+    NB_DE_FRAMES_STEP = 2  # combien de frame pour un step
+    # ==================================================================================================
+    record = True  # Utilise OBS socket server
+    if record:
+        recorder = ScreenRecorder()
+    sum_of_score = mean_score = mean_score_old = last_score = 0
     f2_pressed = False
     response = comm.communicate(
         [
@@ -312,13 +314,12 @@ def main():
         f"[nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]"
     )
     for episode in range(num_episodes):
-        step = 0
+        if record:
+            recorder.start_recording()
+        step = reward = player_life_end = player_alive = 0
         if f2_pressed:
             print("Sortie prématurée de la boucle 'for'.")
             break
-        reward = 0
-        player_life_end = 0
-        player_alive = 0
         response = comm.communicate([f"write_memory {numCoins}(1)"])
         while player_alive == 0:
             player_alive = int(comm.communicate([f"read_memory {player1Alive}"])[0])
@@ -434,6 +435,15 @@ def main():
         )
         _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sum_of_score += score
+        if record:
+            if score > last_score:
+                time.sleep(1) #on garde le "game over" de la fin de partie
+            recorder.stop_recording()
+            time.sleep(0.55) #attente pour laisser le temps à obs d'arrêter l'enregistrement...
+            if score > last_score:
+                time.sleep(2) #visiblement obs prends son temps pour écraser l'ancien fichier...
+                shutil.copy("output-obs.mp4", "best_game.avi")
+                last_score = score
         mean_score_old = mean_score
         mean_score = round(sum_of_score / (episode + 1), 2)
         if mean_score_old > mean_score:
@@ -444,6 +454,9 @@ def main():
         if mean_score == mean_score_old:
             pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
     dqn.sauvegarder_modele()
+    recorder.stop_recording()
+    time.sleep(1)
+    recorder.ws.disconnect()
 
 
 if __name__ == "__main__":

@@ -94,8 +94,39 @@ Ajout de ReplayBuffer:
 après 4000 parties, semble rester à droite converge vers 127 pts ou moins... relance 2000parties => 87pts (micro décroissance), je relance 300 partie 107pts e décroissance //
 
 
-=====================================================================
-teste la simplicité uniquement 12 entrees et 2 action tir continue,
+=====================================================================DQN_invaders_simple.py========================
+==> teste la simplicité uniquement 12 entrees et 2 action tir continue,
 N=1, je garde epsilon, gama=0.99 et learn=0.01 et toutes les frames,
 je garde les rewards avec step+1, kill-2000 et shotstatus
 je garde replay buffer 2000 de capacité 100 de renforcement par step
+après 2500parties excellent 440 pts et continue à monter très lentement (après un creux de 427pts!). 
+je relance:
+[input=12*1=12][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=0.01,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=1][speed=3]
+==> après relance chute jusqu'à 413pts après 500 parties (gros problème de sauvegarde...) [ds1.pth]
+
+[input=12*2=24][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=2][speed=2]
+=> 350 parties 381pts en montée, j'ai du relancer: 400 partie après un >500pts décroissance ~440pts? (ds2.pth)
+
+[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=1][speed=1]
+=>très lent 50%, converge après 200 par ties vers 322pts aucun intérêt d'aggrandir le replay buffer.. (ds3)
+
+[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=0.22,0,0.99999][Replay_size=1000&_samples=100][nb_mess_frame=19][nb_step_frame=3][speed=3]
+==> 732 parties converge vers 415pts (max=1230pts) (ds4)
+
+[input=12*2=24][hidden=200*1#200][output=2][gamma=0.9999][learning=0.0001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=200][nb_mess_frame=19][nb_step_frame=2][speed=3]
+==> 3000 parties et pourtant converge (décroissance lente) vers 400pts... (ds5)
+
+
+[input=12*4=48][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][reward_kill=-1000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][Replay_size=200&_samples=20][nb_mess_frame=20][nb_step_frame=2][speed=3]
+==>2238 parties, ne décolle jamais autour de 355 pts: bouge bien max 1210.avi/ds6
+
+[input=12*1=12][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][reward_kill=-1000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=0.9,0,0.99999][Replay_size=200&_samples=20][nb_mess_frame=20][nb_step_frame=2][speed=9]
+
+
+
+
