@@ -24,7 +24,7 @@ class ScreenRecorder:
 
     def stop_recording(self):
         try:
-            self.ws.call(requests.StopRecord())
+            return(self.ws.call(requests.StopRecord()))
         except Exception as e:
             print(f"Erreur lors de l'arrêt de l'enregistrement : {e}")
 

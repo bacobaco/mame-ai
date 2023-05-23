@@ -83,22 +83,22 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
+import os
+import torch
+from torch import nn
 class DQN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, n=1):
         super(DQN, self).__init__()
         self.n = n
-        self.fc_hidden = []
         self.fc_input = nn.Linear(input_size, hidden_size)
-        self.fc_hidden.extend(
-            nn.Linear(hidden_size, hidden_size) for _ in range(self.n)
-        )
+        self.fc_hidden = nn.ModuleList([nn.Linear(hidden_size, hidden_size) for _ in range(self.n)])
         self.fc_output = nn.Linear(hidden_size, output_size)
         self.chemin = "./dqn_invaders_model_simple.pth"
 
     def forward(self, x):
         x = torch.relu(self.fc_input(x))
-        for i in range(self.n):
-            x = torch.relu(self.fc_hidden[i](x))
+        for layer in self.fc_hidden:
+            x = torch.relu(layer(x))
         x = self.fc_output(x)
         return x
 
@@ -108,7 +108,6 @@ class DQN(nn.Module):
     def charger_modele(self):
         if os.path.exists(self.chemin):
             self.load_state_dict(torch.load(self.chemin))
-            self.eval()
         else:
             print(
                 f"Le fichier {self.chemin} n'existe pas. Impossible de charger le modèle."
@@ -251,20 +250,20 @@ def main():
     # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 2 positions tir joueur + 2 pour ref_alien
     input_size = (10 + 2) * N
     nb_hidden_layer = 1
-    hidden_size = 300
+    hidden_size = 20
     output_size = 2  # nb actions
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
-    learning_rate = 0.01  # 0.01
-    gamma = 0.99  # 0.99
+    learning_rate = 0.001  # 0.01
+    gamma = 0.999  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
-    epsilon_start = 0.9
+    epsilon_start = 0.1
     epsilon_end = 0
     epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
-    reward_alive = +1
+    reward_alive = +0#1
     reward_kill = -1000
-    reward_mult_step = +0.01
+    reward_mult_step = +0#0.01
     dqn = DQN(input_size, hidden_size, output_size, nb_hidden_layer)
     target_dqn = DQN(input_size, hidden_size, output_size, nb_hidden_layer)
     optimizer = optim.Adam(dqn.parameters(), lr=learning_rate)
@@ -272,8 +271,8 @@ def main():
     dqn.charger_modele()
     copier_poids(dqn, target_dqn)
 
-    buffer_capacity = 200  # autour de 1 episode(s)
-    batch_size = 20  # autour d'un 1/10 episode(s)
+    buffer_capacity = 1  # taille des step cumulés
+    batch_size = 1  # taille des steps pris au hasard dans le buffer_capacity pour modif le model
     replay_buffer = ReplayBuffer(buffer_capacity)
 
     # nombre d'info ou commandes à exécuter par frame:
@@ -285,12 +284,13 @@ def main():
     NB_DE_DEMANDES_PAR_FRAME = str(2 + 3 + 2 + 10 + 2 + 1)
 
     # ============================ VITESSE DU JEU ======================================================
-    vitesse_de_jeu = 9
+    vitesse_de_jeu = 5
     NB_DE_FRAMES_STEP = 2  # combien de frame pour un step
     # ==================================================================================================
     record = True  # Utilise OBS socket server
     if record:
         recorder = ScreenRecorder()
+    collection_of_score=deque(maxlen=100) #permet de ne prendre en compte que 500 scores dans la moyenne
     sum_of_score = mean_score = mean_score_old = last_score = 0
     f2_pressed = False
     response = comm.communicate(
@@ -338,7 +338,7 @@ def main():
                 f2_pressed = True
                 break
             if keyboard.is_pressed("ctrl") and keyboard.is_pressed("f4"):
-                debug -= debug > 0
+                debug = 0
                 print(debug)
                 time.sleep(0.1)
             elif keyboard.is_pressed("f4"):
@@ -373,7 +373,7 @@ def main():
             state = next_state
             epsilon = max(epsilon * epsilon_decay, epsilon_end)
             step += 1
-            if len(replay_buffer) > batch_size:
+            if len(replay_buffer) >= batch_size:
                 (
                     state_batch,
                     action_batch,
@@ -433,8 +433,6 @@ def main():
                 f'draw_text(25,1,"Game number: {episode+1:04d} - mean score={mean_score:04.0f} - ba(c)o 2013")'
             ]
         )
-        _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sum_of_score += score
         if record:
             if score > last_score:
                 time.sleep(1) #on garde le "game over" de la fin de partie
@@ -444,19 +442,22 @@ def main():
                 time.sleep(2) #visiblement obs prends son temps pour écraser l'ancien fichier...
                 shutil.copy("output-obs.mp4", "best_game.avi")
                 last_score = score
+        collection_of_score.append(score)
         mean_score_old = mean_score
-        mean_score = round(sum_of_score / (episode + 1), 2)
+        mean_score = round(sum(collection_of_score) / len(collection_of_score), 2)
         if mean_score_old > mean_score:
             epsilon += 0.001
+        if mean_score == mean_score_old:
+            pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
+        _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(
             f"N°{episode+1} [{_d}][nb steps={step:4d}][ε={epsilon:.4f}][reward={reward:3d}][score={score:3d}][score moyen={mean_score:.2f}]"
         )
-        if mean_score == mean_score_old:
-            pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
     dqn.sauvegarder_modele()
-    recorder.stop_recording()
-    time.sleep(1)
-    recorder.ws.disconnect()
+    time.sleep(5)
+    print(recorder.stop_recording())
+    time.sleep(5)
+    print(recorder.ws.disconnect())
 
 
 if __name__ == "__main__":

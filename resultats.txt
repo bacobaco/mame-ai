@@ -101,32 +101,51 @@ je garde les rewards avec step+1, kill-2000 et shotstatus
 je garde replay buffer 2000 de capacité 100 de renforcement par step
 après 2500parties excellent 440 pts et continue à monter très lentement (après un creux de 427pts!). 
 je relance:
-[input=12*1=12][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=0.01,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=1][speed=3]
+1[input=12*1=12][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=0.01,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=1][speed=3]
 ==> après relance chute jusqu'à 413pts après 500 parties (gros problème de sauvegarde...) [ds1.pth]
 
-[input=12*2=24][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=2][speed=2]
+2[input=12*2=24][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=2][speed=2]
 => 350 parties 381pts en montée, j'ai du relancer: 400 partie après un >500pts décroissance ~440pts? (ds2.pth)
 
-[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+3[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
 [epsilon start, end, decay=1,0,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=1][speed=1]
 =>très lent 50%, converge après 200 par ties vers 322pts aucun intérêt d'aggrandir le replay buffer.. (ds3)
 
-[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+4[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
 [epsilon start, end, decay=0.22,0,0.99999][Replay_size=1000&_samples=100][nb_mess_frame=19][nb_step_frame=3][speed=3]
 ==> 732 parties converge vers 415pts (max=1230pts) (ds4)
 
-[input=12*2=24][hidden=200*1#200][output=2][gamma=0.9999][learning=0.0001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+5[input=12*2=24][hidden=200*1#200][output=2][gamma=0.9999][learning=0.0001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
 [epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=200][nb_mess_frame=19][nb_step_frame=2][speed=3]
 ==> 3000 parties et pourtant converge (décroissance lente) vers 400pts... (ds5)
 
 
-[input=12*4=48][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][reward_kill=-1000][reward_alive=1][reward_step=0.01]
+6[input=12*4=48][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][reward_kill=-1000][reward_alive=1][reward_step=0.01]
 [epsilon start, end, decay=1,0,0.99999][Replay_size=200&_samples=20][nb_mess_frame=20][nb_step_frame=2][speed=3]
 ==>2238 parties, ne décolle jamais autour de 355 pts: bouge bien max 1210.avi/ds6
 
-[input=12*1=12][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][reward_kill=-1000][reward_alive=1][reward_step=0.01]
+7[INPUT=12*1=12][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][reward_kill=-1000][reward_alive=1][reward_step=0.01]
 [epsilon start, end, decay=0.9,0,0.99999][Replay_size=200&_samples=20][nb_mess_frame=20][nb_step_frame=2][speed=9]
+==> 800 parties converge vers 375 pts (max990pts)
 
+8[input=12*1=12][hidden=300*1#300][output=2][gamma=0.99][learning=0.01][REWARD_KILL=-5000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][REPLAY_SIZE=1&SAMPLES=1][nb_mess_frame=20][NB_STEP_FRAME=1][speed=5]
+==> 1000 parties converge autour de 460pts avec record 1260.avi/ds7
 
+9[input=12*1=12][HIDDEN=100*2#10000][output=2][GAMMA=0.999][LEARNING=0.001][reward_kill=-5000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=1][speed=5]
+==> 4000 parties, converge vers 423pts...
 
+10[input=12*1=12][HIDDEN=300*2#90000][output=2][gamma=0.999][learning=0.001][reward_kill=-5000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=1][speed=5]
+==> après 4739 parties score moyen est monté jusqu'à 488pts après 2000 puis converge et décroît autour de 466pts (record 1390!.avi/ds8)
+relance avec e=0.5: après 450 parties 546pts de moyenne en hausse ! je relance à e=0.5: 410 pts... après 400 parties. je relance e=0.9 410 après 2500 parties...
 
+[input=12*1=12][HIDDEN=10*1][output=2][gamma=0.999][learning=0.001][REWARD_KILL=-1000][REWARD_ALIVE=0][REWARD_STEP=0]
+[epsilon start, end, decay=0.9,0,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=2][speed=5]
+=> après 800 parties est monté jusqu'à 433pts (que 10neurones!) mais après reste à gauche?
+
+[input=12*1=12][HIDDEN=20*1][output=2][gamma=0.999][learning=0.001][reward_kill=-1000][reward_alive=0][reward_step=0]
+[epsilon start, end, decay=0.0247,0,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=2][speed=5]
+=> après 5250 parties (8,8M de frame_in_game) plateau à 445 avec un record (1480pts!); à la relance il reste à droite ? incompréhensible...
+=> j'ai trouvé l'erreur d'enregistrement... je relance tout depuis le début avec les modif apporté sur la sauvegarde et l'init de self.fc_hidden
