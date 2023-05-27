@@ -50,7 +50,7 @@
 /ui.ini
 /xml
 /__pycache__
-/models-invaders
+/old-models-invaders
 dqn_invaders_model_simple.pth
 1210.avi
 best_game.avi

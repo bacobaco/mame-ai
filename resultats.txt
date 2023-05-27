@@ -141,11 +141,46 @@ je relance:
 ==> après 4739 parties score moyen est monté jusqu'à 488pts après 2000 puis converge et décroît autour de 466pts (record 1390!.avi/ds8)
 relance avec e=0.5: après 450 parties 546pts de moyenne en hausse ! je relance à e=0.5: 410 pts... après 400 parties. je relance e=0.9 410 après 2500 parties...
 
-[input=12*1=12][HIDDEN=10*1][output=2][gamma=0.999][learning=0.001][REWARD_KILL=-1000][REWARD_ALIVE=0][REWARD_STEP=0]
+11[input=12*1=12][HIDDEN=10*1][output=2][gamma=0.999][learning=0.001][REWARD_KILL=-1000][REWARD_ALIVE=0][REWARD_STEP=0]
 [epsilon start, end, decay=0.9,0,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=2][speed=5]
 => après 800 parties est monté jusqu'à 433pts (que 10neurones!) mais après reste à gauche?
 
-[input=12*1=12][HIDDEN=20*1][output=2][gamma=0.999][learning=0.001][reward_kill=-1000][reward_alive=0][reward_step=0]
+12[input=12*1=12][HIDDEN=20*1][output=2][gamma=0.999][learning=0.001][reward_kill=-1000][reward_alive=0][reward_step=0]
 [epsilon start, end, decay=0.0247,0,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=2][speed=5]
 => après 5250 parties (8,8M de frame_in_game) plateau à 445 avec un record (1480pts!); à la relance il reste à droite ? incompréhensible...
-=> j'ai trouvé l'erreur d'enregistrement... je relance tout depuis le début avec les modif apporté sur la sauvegarde et l'init de self.fc_hidden
+=> j'ai trouvé l'erreur d'enregistrement... je relance tout depuis le début avec les modif apporté sur la sauvegarde et l'init de self.fc_hidden,
+après 3500 parties chute de la moyenne autour de 200 pourtant est monté jusqu'à 550pts... semble aléatoire; j'ai encore relancé et
+semble de nouveau autour des 450pts... bizarre (ds12)
+
+13[input=12*1=12][HIDDEN=20*2][output=2][gamma=0.999][learning=0.001][REWARD_KILL=-2000][reward_alive=0][reward_step=0]
+[epsilon start, end, decay=1,0.1,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=2][speed=5]
+=> après 1600 parties ne décolle presque pas reste autour de 300pts... (i13). je relance reste souvent à gauche pas d'amélioration...
+
+14[INPUT=12*2=24][hidden=20*1#542][output=2][gamma=0.999][learning=0.001][REWARD_KILL=-1000][reward_alive=0][reward_step=0]
+[epsilon start, end, decay=1.0,0.1,0.99999][Replay_size=1&_samples=1][nb_mess_frame=20][NB_STEP_FRAME=1][speed=5]
+=> 3700 parties: décroissance après 1500 parties 450pts de moy max... reste à gauche... double entrées N=2 marche pas? (i14)
+
+15[INPUT=12*1=12][HIDDEN=30*1#452][output=2][gamma=0.999][learning=0.001][REWARD_KILL=-500][reward_alive=0][reward_step=0]
+[epsilon start, end, DECAY=1,0.1,0.999999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=1][speed=5]
+=>1400parties: montée régulière jusqu'à 700 parties/550pts max puis chute à 290pts...(i15.png)
+
+16[input=12*1=12][hidden=30*1#483][OUTPUT(stop)=3][gamma=0.999][learning=0.001][reward_kill=-500][reward_alive=0][reward_step=0]
+[epsilon start, end, decay=1,0.1,0.999999][Replay_size=1&_samples=1][nb_mess_frame=20][nb_step_frame=1][speed=5]
+=>pareil que le 15 mais avec le "stop" action en plus, semble s'écrouler vers 800 parties (max420ptsmoy)
+
+###########MODIFICATION DES ENTREES IN RETIRE LA REF ALIEN (pas pertinent)##################################################
+
+17[input=10*1=10][hidden=30*1#423][output=3][gamma=0.999][learning=0.001][reward_kill=-500][reward_alive=0][reward_step=0]
+[epsilon start, end, decay=1.0,0.1,0.999999][Replay_size=1&_samples=1][nb_mess_frame=18][nb_step_frame=1][speed=5]
+comme le 16 mais sans ref alien, pas trop de changement après 3900 parties autour 390pts 
+
+
+18[input=10*1=10][hidden=30*1#423][output=3][gamma=0.999][learning=0.001][reward_kill=-500][reward_alive=0][reward_step=0]
+[epsilon start, end, DECAY=1.0,0.1,0.99999][REPLAY_SIZE=10000&SAMPLES=1000][nb_mess_frame=18][NB_STEP_FRAME=5][speed=5]
+=> grace au replay_buffer(?) croit "rapidement" autour de 500/600pts(!) après 1000 parties. 
+je relance (e=0.2) retrouve rapidement (200 parties) les 550pts ! mais grosse variations après500 parties entre 425 et 600 pts...
+
+19[input=10*1=10][hidden=30*1#423][output=3][GAMMA=0.9999][learning=0.001][REWARD_KILL=-1500][reward_alive=0][reward_step=0]
+[epsilon start, end, decay=0.2,0.1,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=18][NB_STEP_FRAME=4][speed=5]
+=>après 2200 parties oscille autour de 500pts bouge bien
+

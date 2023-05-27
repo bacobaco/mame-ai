@@ -17,7 +17,7 @@ class ScreenRecorder:
         try:
             if not self.ws.call(requests.StartRecord()).status:
                 print(
-                    "Visiblement l'enregistrement est toujours en cours au moment du StartRecord()..."
+                    "WARNING! Visiblement l'enregistrement OBS est toujours en cours au moment du StartRecord()..."
                 )
         except Exception as e:
             print(f"Erreur lors du démarrage de l'enregistrement : {e}")

@@ -16,10 +16,10 @@ from ScreenRecorder import ScreenRecorder
 comm = MameCommunicator("localhost", 12345)
 
 # Constantes
-MAX_PLAYER_POS = 255
-MAX_SAUCER_POS = 255
-MAX_BOMB_POS_X = 255
-MAX_BOMB_POS_Y = 255
+MAX_PLAYER_POS = 255.0
+MAX_SAUCER_POS = 255.0
+MAX_BOMB_POS_X = 255.0
+MAX_BOMB_POS_Y = 255.0
 ACTION_DELAY = 0.01
 debug = 0
 flag_tir = True
@@ -60,8 +60,9 @@ player1Alive = "20E7"  # 1 if player is alive, 0 if dead (after last man)
 actions = {
     0: "left",
     1: "right",
-}  # , 2: "stop", 3: "tir", 4: "tir-left", 5: "tir-right"}
-
+    2: "stop",
+    #3: "tir", 4: "tir-left", 5: "tir-right"
+}
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -82,16 +83,14 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-
-import os
-import torch
-from torch import nn
 class DQN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, n=1):
         super(DQN, self).__init__()
         self.n = n
         self.fc_input = nn.Linear(input_size, hidden_size)
-        self.fc_hidden = nn.ModuleList([nn.Linear(hidden_size, hidden_size) for _ in range(self.n)])
+        self.fc_hidden = nn.ModuleList(
+            [nn.Linear(hidden_size, hidden_size) for _ in range(self.n)]
+        )
         self.fc_output = nn.Linear(hidden_size, output_size)
         self.chemin = "./dqn_invaders_model_simple.pth"
 
@@ -113,10 +112,8 @@ class DQN(nn.Module):
                 f"Le fichier {self.chemin} n'existe pas. Impossible de charger le modèle."
             )
 
-
 def copier_poids(dqn_source, dqn_cible):
     dqn_cible.load_state_dict(dqn_source.state_dict())
-
 
 def choisir_action(dqn, etat, epsilon):
     if random.random() < epsilon:
@@ -124,19 +121,19 @@ def choisir_action(dqn, etat, epsilon):
     q_values = dqn(torch.tensor(etat, dtype=torch.float32))
     return torch.argmax(q_values).item()
 
-
 def executer_action(action):
     global flag_tir
     if actions[action] == "left":
         response = comm.communicate(["execute P1_left(1)", "execute P1_right(0)"])
     elif actions[action] == "right":
         response = comm.communicate(["execute P1_left(0)", "execute P1_right(1)"])
+    elif actions[action] == "stop":
+        response = comm.communicate(["execute P1_left(0)", "execute P1_right(0)"])
     if flag_tir:
         comm.communicate(["execute P1_Button_1(1)"])
     else:
         comm.communicate(["execute P1_Button_1(0)"])
     flag_tir = not flag_tir
-
 
 def get_score():
     response = comm.communicate(
@@ -147,18 +144,17 @@ def get_score():
         ]
     )
     P1ScorL_v, P1ScorM_v, P1ShotStatus = list(map(int, response))
-    if debug == 1:
+    if debug >= 3:
         print(f"==>SHOT STATUS={P1ShotStatus}")
     # ShotStatus	0 if available, 1 if just initiated, 2 moving normally, 3 hit something besides alien, 5 if alien explosion is in progress, 4 if alien has exploded (remove from active duty)
     return (
         (P1ScorL_v >> 4) * 10
         + (P1ScorM_v & 0x0F) * 100
         + ((P1ScorM_v) >> 4) * 1000
-        + (P1ShotStatus == 5)  # alien is explosing
-        + (P1ShotStatus == 4) * 5  # alien has exploded
+        #+ (P1ShotStatus == 5)  # alien is explosing
+        #+ (P1ShotStatus == 4) * 5  # alien has exploded
         # - (P1ShotStatus == 3) #hit shield or nothing
     )
-
 
 def get_state():
     # Lire les informations de la mémoire du jeu position du player et soucoupe
@@ -174,11 +170,11 @@ def get_state():
             f"read_memory {pluShotYr}",
             f"read_memory {squShotXr}",
             f"read_memory {squShotYr}",
-            f"read_memory {refAlienXr}",
-            f"read_memory {refAlienYr}",
+        #    f"read_memory {refAlienXr}",
+        #    f"read_memory {refAlienYr}",
         ]
     )
-    player_pos, psx, psy, saucer_pos, rx, ry, px, py, sx, sy, ax, ay = list(
+    player_pos, psx, psy, saucer_pos, rx, ry, px, py, sx, sy= list(
         map(int, response)
     )
     return np.array(
@@ -193,13 +189,12 @@ def get_state():
             py,
             sx,
             sy,
-            ax,
-            ay,
+            #ax,
+            #ay,
             # *extract_alien_coordinates(),
             # *extract_shield_info(),
         ]
     )
-
 
 # non utilisé uniquement position de l'alien en bas à gauche
 def extract_alien_coordinates():
@@ -225,8 +220,6 @@ def extract_alien_coordinates():
             # The alien is dead, set the coordinates to (0, 0)
             alien_coordinates.append((0, 0))
     return [element for couple in alien_coordinates for element in couple]
-
-
 # non utilisé
 def extract_shield_info():
     messages = []
@@ -238,6 +231,63 @@ def extract_shield_info():
     return list(map(int, comm.communicate(messages)))
 
 
+def nb_parameters(e, H, n, s):
+    # Poids et biais de la première couche cachée
+    parameters = e * n + n
+    # Poids et biais des couches cachées intermédiaires
+    if H > 1:
+        parameters += (H - 1) * (n * n + n)
+    # Poids et biais de la couche de sortie
+    parameters += n * s + s
+    return parameters
+
+def create_fig(nb_parties, scores_moyens, fenetre, epsilons):
+    
+    import matplotlib.pyplot as plt
+
+    print("===> création d'un graph des scores moyens....")
+    fig, ax1 = plt.subplots()
+
+    color = "tab:blue"
+    # L'axe des y de ax1 représentera epsilon
+    ax1.set_xlabel("Episodes/Parties")
+    ax1.set_ylabel("Epsilon", color=color)
+    ax1.plot(epsilons, color=color, linestyle="dashed")
+    ax1.tick_params(axis="y", labelcolor=color)
+    # Ajout d'une grille pour l'axe des y de ax1
+    ax1.grid(True, which='both', axis='both', linestyle='-', linewidth=0.5)
+    # Création d'un deuxième axe des y pour l'évolution score moyen
+    ax2 = ax1.twinx()
+
+    color = "tab:red"
+    # L'axe des y de ax2 représentera le score moyen 
+    ax2.set_ylabel(f"Score moyen (pour {fenetre} parties)", color=color, rotation=270, labelpad=10)
+    ax2.plot(scores_moyens, color=color)
+    ax2.tick_params(axis="y", labelcolor=color)
+    # Ajout d'une grille pour l'axe des y de ax2
+    ax2.grid(True, which='both', axis='both', linestyle='-', linewidth=0.5)
+    
+    # Calcul des coefficients de la ligne de tendance
+    coefficients = np.polyfit(range(len(scores_moyens)), scores_moyens, 1)
+    pente = coefficients[0]  # Pente de la ligne de tendance
+    # Génération des valeurs y pour la ligne de tendance
+    trendline = np.poly1d(coefficients)
+    # Tracé de la ligne de tendance
+    ax2.plot(trendline(range(len(scores_moyens))), color="tab:orange")
+    # Calcul de l'angle de la ligne de tendance en degrés
+    angle = np.arctan(pente) * 180 / np.pi
+    midpoint = len(scores_moyens)/2
+    ax2.text(midpoint, trendline(midpoint) + trendline(midpoint)*0.01, f'Pente = {pente:.2f}', color='tab:orange', ha='center', rotation=angle,rotation_mode='anchor', transform_rotates_text=True)
+
+    fig.tight_layout()
+
+    plt.title(f"Evolution du score moyen et d'Epsilon sur {str(nb_parties)} épisodes")
+
+    # Sauvegarde du graphique dans un fichier
+    plt.savefig("evolution_score_moyen_et_epsilon.png", dpi=300, bbox_inches="tight")
+    
+    return(pente)
+
 def main():
     # Utilisation de plusieurs états en entrée du réseau permettant d'avoir un historique
     # cette historique refléterait la dynamique des positions (vitesse)?
@@ -248,22 +298,43 @@ def main():
     ############################################
     # Taille de l'entrée du réseau de neurones (à adapter en fonction de vos besoins)
     # 3*2 positions des bombes 1 position joueur et 1 pos soucoupe et 2 positions tir joueur + 2 pour ref_alien
-    input_size = (10 + 2) * N
+    input_size = (10) * N
     nb_hidden_layer = 1
-    hidden_size = 20
-    output_size = 2  # nb actions
+    hidden_size = 22
+    output_size = 3  # nb actions
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
     learning_rate = 0.001  # 0.01
-    gamma = 0.999  # 0.99
+    gamma = 0.9999  # 0.99
     num_episodes = 10000  # nb de partie quasi infini ;-)
-    epsilon_start = 0.1
-    epsilon_end = 0
+    epsilon_start = 0.9
+    epsilon_end = 0.1
     epsilon_decay = 0.99999  # 0.99999
     epsilon = epsilon_start
-    reward_alive = +0#1
+    reward_alive = 0  # 1
     reward_kill = -1000
-    reward_mult_step = +0#0.01
+    reward_mult_step = 0.0  # 0.01
+
+    buffer_capacity = 10000  # taille des step cumulés
+    batch_size = (
+        1000  # taille des steps pris au hasard dans le buffer_capacity pour modif le model
+    )
+    replay_buffer = ReplayBuffer(buffer_capacity)
+
+    # nombre d'info ou commandes à exécuter par frame:
+    # 2 pour connaître l'état du joueur
+    # 3 pour calcul score 2 pour score et un pour status shot
+    # 2 pour l'action (left ou right ou stop + 1 tir)
+    # récupération des actions: 10 
+    # et 1 pour le message "wait_for" lui même ?
+    NB_DE_DEMANDES_PAR_FRAME = str(2 + 3 + 2+1 + 10)
+
+    # ============================ VITESSE DU JEU ======================================================
+    vitesse_de_jeu = 5
+    NB_DE_FRAMES_STEP = 4  # combien de frame pour un step
+    # ==================================================================================================
+
+    ##########Créer lee deux réseaux de neurones
     dqn = DQN(input_size, hidden_size, output_size, nb_hidden_layer)
     target_dqn = DQN(input_size, hidden_size, output_size, nb_hidden_layer)
     optimizer = optim.Adam(dqn.parameters(), lr=learning_rate)
@@ -271,27 +342,16 @@ def main():
     dqn.charger_modele()
     copier_poids(dqn, target_dqn)
 
-    buffer_capacity = 1  # taille des step cumulés
-    batch_size = 1  # taille des steps pris au hasard dans le buffer_capacity pour modif le model
-    replay_buffer = ReplayBuffer(buffer_capacity)
-
-    # nombre d'info ou commandes à exécuter par frame:
-    # 2 pour connaître l'état du joueur
-    # 3 pour calcul score 2 pour score et un pour status shot
-    # 2 pour l'action (left ou right plus tir)
-    # récupération des actions: 10 + 2 alien ref
-    # et 1 pour le message "wait_for" lui même !
-    NB_DE_DEMANDES_PAR_FRAME = str(2 + 3 + 2 + 10 + 2 + 1)
-
-    # ============================ VITESSE DU JEU ======================================================
-    vitesse_de_jeu = 5
-    NB_DE_FRAMES_STEP = 2  # combien de frame pour un step
-    # ==================================================================================================
     record = True  # Utilise OBS socket server
     if record:
         recorder = ScreenRecorder()
-    collection_of_score=deque(maxlen=100) #permet de ne prendre en compte que 500 scores dans la moyenne
-    sum_of_score = mean_score = mean_score_old = last_score = 0
+    fenetre_du_calcul_de_la_moyenne = 100
+    collection_of_score = deque(
+        maxlen=fenetre_du_calcul_de_la_moyenne
+    )  # permet de ne prendre en compte que 500 scores dans la moyenne
+    list_of_mean_scores = []
+    list_of_epsilons = []
+    mean_score = mean_score_old = last_score =0
     f2_pressed = False
     response = comm.communicate(
         [
@@ -304,7 +364,7 @@ def main():
     )
     print(
         f"[input={input_size//N}*{N}={input_size}]"
-        f"[hidden={hidden_size}*{nb_hidden_layer}#{hidden_size**nb_hidden_layer}]"
+        f"[hidden={hidden_size}*{nb_hidden_layer}#{nb_parameters(input_size,nb_hidden_layer,hidden_size,output_size)}]"
         f"[output={output_size}]"
         f"[gamma={gamma}][learning={learning_rate}]"
         f"[reward_kill={reward_kill}][reward_alive={reward_alive}][reward_step={reward_mult_step}]"
@@ -316,7 +376,7 @@ def main():
     for episode in range(num_episodes):
         if record:
             recorder.start_recording()
-        step = reward = player_life_end = player_alive = 0
+        step = reward = player_life_end = player_alive =  score = 0
         if f2_pressed:
             print("Sortie prématurée de la boucle 'for'.")
             break
@@ -337,14 +397,23 @@ def main():
                 print("Touche 'F2' détectée. Sortie prématurée de la boucle.")
                 f2_pressed = True
                 break
-            if keyboard.is_pressed("ctrl") and keyboard.is_pressed("f4"):
+            elif keyboard.is_pressed("ctrl") and keyboard.is_pressed("f4"):
                 debug = 0
-                print(debug)
-                time.sleep(0.1)
+                print(f"debug={debug}")
+                time.sleep(0.2)
             elif keyboard.is_pressed("f4"):
-                debug += debug < 2
-                print(debug)
-                time.sleep(0.1)
+                debug += debug < 3
+                print(f"debug={debug}")
+                time.sleep(0.2)
+            elif keyboard.is_pressed("f7"):
+                _pente=create_fig(
+                    episode,
+                    list_of_mean_scores,
+                    fenetre_du_calcul_de_la_moyenne,
+                    list_of_epsilons,
+                )
+                if _pente<0.1 and episode>100:break
+                time.sleep(0.2)
             player_life_end, player_alive = list(
                 map(
                     int,
@@ -356,22 +425,26 @@ def main():
                     ),
                 )
             )
-
             # Choisir une action en fonction de l'état actuel et de la stratégie epsilon-greedy
             action = choisir_action(dqn, state, epsilon)
             # Exécuter l'action dans MAME et obtenir la récompense et l'état suivant
             executer_action(action)
+            _last_score=score
             score = get_score()
             reward = round(score + step * reward_mult_step) + (
                 reward_kill if player_life_end < 255 else reward_alive
-            )  # step lower reward
+            )  -_last_score
             # Mettre à jour le réseau de neurones
-            state_history.append(get_state())  # utilisation de plusieurs états
+            state_history.append(get_state())  # ajouter un état dans la collection history actuellement pas utilisé capacity=1
             next_state = np.concatenate(state_history)  # un seul vecteur aplatit
-            done = player_alive == 0
+            done = player_alive == 0 #done = fin d'épisode
             replay_buffer.push(state, action, reward, next_state, done)
+            if debug>=2:print(f"last ={next_state}\nstate={state}")
             state = next_state
-            epsilon = max(epsilon * epsilon_decay, epsilon_end)
+            epsilon = max(
+                epsilon * epsilon_decay,
+                epsilon_end,
+            )
             step += 1
             if len(replay_buffer) >= batch_size:
                 (
@@ -381,7 +454,7 @@ def main():
                     next_state_batch,
                     done_batch,
                 ) = replay_buffer.sample(batch_size)
-                if debug == 2:
+                if debug >= 3:
                     print(
                         state_batch,
                         action_batch,
@@ -417,7 +490,7 @@ def main():
                 time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
                 comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
             # Insérer ici le code pour sauvegarder le modèle, afficher les statistiques, etc.
-            if debug == 1:
+            if debug >= 1:
                 print(
                     f"action={actions[action]:<9}episode={episode:<5d}player_kill={player_life_end:<4d}player_end_game={player_alive:<2d}reward={reward:<5d}nb_mess_step={comm.number_of_messages:<4d}nb_step={step:<5d}score={score:<5d}"
                 )
@@ -435,16 +508,22 @@ def main():
         )
         if record:
             if score > last_score:
-                time.sleep(1) #on garde le "game over" de la fin de partie
+                time.sleep(1)  # on garde le "game over" de la fin de partie
             recorder.stop_recording()
-            time.sleep(0.55) #attente pour laisser le temps à obs d'arrêter l'enregistrement...
+            time.sleep(
+                0.55
+            )  # attente pour laisser le temps à obs d'arrêter l'enregistrement...
             if score > last_score:
-                time.sleep(2) #visiblement obs prends son temps pour écraser l'ancien fichier...
+                time.sleep(
+                    2
+                )  # visiblement obs prends son temps pour écraser l'ancien fichier...
                 shutil.copy("output-obs.mp4", "best_game.avi")
                 last_score = score
         collection_of_score.append(score)
         mean_score_old = mean_score
         mean_score = round(sum(collection_of_score) / len(collection_of_score), 2)
+        list_of_mean_scores.append(mean_score)
+        list_of_epsilons.append(epsilon)
         if mean_score_old > mean_score:
             epsilon += 0.001
         if mean_score == mean_score_old:
