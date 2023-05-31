@@ -5,26 +5,64 @@
 local flag = 0
 local frame = 0
 local latence = 0.0
-local debug = false
+local debug = True
+local port_game = 12345
 
+local game = emu.romname()
+if debug then
+    print(game)
+end
 local machine = manager.machine
 local screen = machine.screens[":screen"]
 local cpu = machine.devices[":maincpu"]
 local mem = cpu.spaces["program"]
 local ioport = machine.ioport
-local in0 = ioport.ports[":CONTP1"]
-local in1 = ioport.ports[":IN1"]
--- Définitions des ports d'entrée MAME (à adapter à votre configuration)
-local P1_left = in0.fields["P1 Left"]
-local P1_right = in0.fields["P1 Right"]
-local P1_Button_1 = in0.fields["P1 Button 1"]
-local P1_start = in1.fields["1 Player Start"]
--- Ajoutez d'autres définitions de ports ici si nécessaire
-
+local function show_mame_game_ioports()
+    for f, i in pairs(ioport.ports) do
+        print(f, " - ioport:", i)
+        for ff, j in pairs(ioport.ports[f].fields) do
+            print("\tfield:", ff)
+        end
+    end
+end
+show_mame_game_ioports()
+local jeu
+if game == "invaders" then
+    port_game = 12345
+    in0 = ioport.ports[":CONTP1"]
+    in1 = ioport.ports[":IN1"]
+    jeu = {
+        P1_left = in0.fields["P1 Left"],
+        P1_right = in0.fields["P1 Right"],
+        P1_Button_1 = in0.fields["P1 Button 1"],
+        P1_start = in1.fields["1 Player Start"]
+    }
+elseif game == "pacman" then
+    port_game = 12346
+    dsw1 = ioport.ports[":DSW1"]
+    in0 = ioport.ports[":IN0"]
+    in1 = ioport.ports[":IN1"]
+    jeu = {
+        Lives = dsw1.fields["Lives"],
+        P1_Left = in0.fields["P1 Left"],
+        P1_Right = in0.fields["P1 Right"],
+        P1_Down = in0.fields["P1 Down"],
+        P1_Up = in0.fields["P1 Up"],
+        Coin_1 = in0.fields["Coin 1"],
+        Coin_2 = in0.fields["Coin 2"],
+        P1_start = in1.fields["1 Player Start"]
+    }
+else
+    -- Gérer d'autres jeux si nécessaire
+end
+for key, value in pairs(jeu) do
+    -- Faites quelque chose avec chaque paire clé-valeur de la table
+    print(key, value)
+end
 -------------------SOCKET COMM START
 local socket = require("socket")
 local host = "127.0.0.1"
-local port = 12345
+local port = port_game
 
 local server = assert(socket.bind(host, port))
 local ip, port = server:getsockname()
@@ -33,7 +71,7 @@ print("Le serveur est en écoute sur le port " .. port)
 server:settimeout(5) -- 5 secondes de timeout
 local client = nil
 
--- La fonction accept_client()
+-- La fonction accept_client(): attente d'un client socket 
 local function accept_client()
     print("En attente d'un client...")
     while not client do
@@ -75,22 +113,19 @@ end
 --------------------SOCKET COMM END
 
 local function execute_command(command, value)
-    if command == "P1_left" then
-        P1_left:set_value(tonumber(value))
-    elseif command == "P1_right" then
-        P1_right:set_value(tonumber(value))
-    elseif command == "P1_start" then
-        P1_start:set_value(tonumber(value))
-    elseif command == "P1_Button_1" then
-        P1_Button_1:set_value(tonumber(value))
-    elseif command == "throttle_rate" then
+    -- commandes communes à mame 
+    if command == "throttle_rate" then
         machine.video.throttle_rate = tonumber(value)
     elseif command == "throttled" then
         machine.video.throttled = tonumber(value)
-        -- ajoutez d'autres commandes ici si n�cessaire
-    else
-        print(command, value)
-        send_to_python({"ERR: execute_command:" .. command .. " non comprise!"})
+    else -- autre commande forcément lié au jeu
+        local variable = rawget(jeu, command)
+        if variable == nil then
+            print(command, value)
+            send_to_python({"ERR: execute_command:" .. command .. " non comprise!"})
+        else
+            variable:set_value(tonumber(value))
+        end
     end
 end
 

@@ -104,7 +104,8 @@ je relance:
 1[input=12*1=12][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=0.01,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=1][speed=3]
 ==> après relance chute jusqu'à 413pts après 500 parties (gros problème de sauvegarde...) [ds1.pth]
 
-2[input=12*2=24][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01][epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=2][speed=2]
+2[input=12*2=24][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
+[epsilon start, end, decay=1,0,0.99999][Replay_size=2000&_samples=100][nb_mess_frame=19][nb_step_frame=2][speed=2]
 => 350 parties 381pts en montée, j'ai du relancer: 400 partie après un >500pts décroissance ~440pts? (ds2.pth)
 
 3[input=12*3=36][hidden=500*1#500][output=2][gamma=0.999][learning=0.001][reward_kill=-2000][reward_alive=1][reward_step=0.01]
@@ -184,3 +185,31 @@ je relance (e=0.2) retrouve rapidement (200 parties) les 550pts ! mais grosse va
 [epsilon start, end, decay=0.2,0.1,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=18][NB_STEP_FRAME=4][speed=5]
 =>après 2200 parties oscille autour de 500pts bouge bien
 
+20[input=10*1=10][HIDDEN=22*1#311][output=3][gamma=0.9999][learning=0.001][REWARD_KILL=-1000][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay=1,0.1,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=18][nb_step_frame=4][speed=5]
+=> "reward only kills", après 1300 parties 600pts de moyenne (690 au max) après 2 relances 700pts de moyenne et max 1890pts!
+je relance encore après ~600 parties et avec reward_add =0.005: 600pts de moyen
+
+############## JE REMETS LE TIR EN ACTION et Y POS Aliens avec reward négatif ##########################
+21[input=11*1=11][hidden=22*1#356][output=4][gamma=0.9999][learning=0.001][reward_kill=-1000][reward_alive=0][reward_step=0.0]
+0[epsilon start, end, decay, add=1,0.0,0.99999,0.005][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=4][speed=8]
+=> après 800 parties en lente montée au tour de 322 pts décevant... je relance après 3000 parties 290pts délire...
+
+############## Je retire l'entrée ref alien pos....#########################################
+22[input=10*1=10][hidden=22*1#334][output=4][gamma=0.9999][learning=0.001][reward_kill=-100][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay, add=1,0.0,0.99999,0.005][Replay_size=1000&_samples=100][nb_mess_frame=19][nb_step_frame=4][speed=8]
+=> après 2*300 parties catastrophique 200 pts max
+
+######Je vais remettre le posy et retire le tir action. ..###############
+23[input=11*1=11][hidden=22*1#333][output=3][gamma=0.9999][learning=0.001][reward_kill=-1000][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay, add=0.99,0.0,0.99999,0.005][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=4][speed=5]
+=> visiblement le tir en action ne marche pas du tout, après 1600 partie on a  460pts moy on est monté à 600pts!
+Je relance mais sans les reward négatif pour AlienYpos => catastrophe après 350 partie décolle pas 400pts...
+
+24[input=11*1=11][HIDDEN=50*1#753][output=3][gamma=0.9999][learning=0.001][reward_kill=-1000][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay, add=0.99,0.0,0.99999,0.005][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=4][speed=8]
+=> on reprends les rewards négatif, après 600 parties 470pts... je relance mais après 3000parties en plus descente autour 350pts...
+
+25[input=11*1=11][hidden=50*1#753][output=3][gamma=0.9999][learning=0.001][reward_kill=-5000][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay, add=0.99,0.0,0.99999,0.005][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=4][speed=5]
+=> autour de 536pts après 1700 parties, j'ai du relancer... autour de 500pts après 300parties de plus
