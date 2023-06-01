@@ -11,35 +11,42 @@ from collections import deque
 from MameCommSocket import MameCommunicator
 from ScreenRecorder import ScreenRecorder
 
+import subprocess
+
+# shortcut = 'E:\\Emulateurs\\Mame Officiel\\mame.exe - puckman - comm python socket.lnk'
+# process = subprocess.Popen(f'cmd.exe /c start "" "{shortcut}"')
+command = [
+    "E:\\Emulateurs\\Mame Officiel\\mame.exe",
+    "-artwork_crop",
+    "-console",
+    "-noautosave",
+    "pacman",
+    "-autoboot_delay",
+    "1",
+    "-autoboot_script",
+    "E:\\Emulateurs\\Mame Sets\\MAME EXTRAs\\plugins\\PythonBridgeSocket.lua",
+]
+process = subprocess.Popen(command, cwd="E:\\Emulateurs\\Mame Officiel")
+time.sleep(5)
 
 # Initialisation socket port unique défini dans PythonBridgeSocket.lua
 comm = MameCommunicator("localhost", 12346)
 
-# Constantes
-MAX_PLAYER_POS = 255.0
 debug = 0
 
-# Adresses du jeu Pac-Man
-# https://datacrystal.romhacking.net/wiki/Pac-Man:RAM_map
-CurrentScoreUnites = "0070"
-CurrentScoreDizaines = "0071"
-CurrentScoreCentaines = "0072"
-CurrentScoreMilliers = "0073"
-CurrentScoreDizainesDeMilliers = "0074"
-CurrentScoreCentainesDeMilliers = "0075"
-
-CurrentLives = "0067"
-RemainingPellets = "006A"
-
-PacManCoordX = "001A"
+# Adresses du jeu Pac-Man# Trouvé en utilisant le debugger de MAME
+AdScoreDizaines = "4E80"  # représente directement en décimal les dizaines de score (0x70 correspond à 70 pts)
+AdScoreCentaines = "4E81"  # représente directement en décimal les centaines de score (0x70 correspond à 7000 pts)
+AdScoreMilliers = "4E82"  # représente directement en décimal les dizaines de milliers de score (0x70 correspond à 700000 pts)
+AdCredits = "4E6E"
+AdPillsAccumulator = "4E0E"  # visiblement augmente de 1 à chaque fois que pacman attrape une pillule (bonus compris)
+AdNbPlayerLive = (
+    "4E14"  # nb de vie restante réellement 'n'influe pas l'affichage des vies...)
+)
+AdPlayerAlive = "4EAE"  # également "4EAC" semble être à zéro quand le joueur n'est pas actif (avant le début, après la mort,...)
 
 # Liste des actions du jeu demandées au réseau de neurone
-actions = {
-    0: "left",
-    1: "right",
-    2: "up",
-    3: "down",
-}
+actions = {0: "left", 1: "right", 2: "up", 3: "down"}
 
 
 class ReplayBuffer:
@@ -146,30 +153,33 @@ def executer_action(action):
 def get_score():
     response = comm.communicate(
         [
-            f"read_memory {CurrentScoreUnites}",
-            f"read_memory {CurrentScoreDizaines}",
-            f"read_memory {CurrentScoreCentaines}",
-            f"read_memory {CurrentScoreMilliers}",
-            f"read_memory {CurrentScoreDizainesDeMilliers}",
-            f"read_memory {CurrentScoreCentainesDeMilliers}",
+            f"read_memory {AdScoreDizaines}",
+            f"read_memory {AdScoreCentaines}",
+            f"read_memory {AdScoreMilliers}",
         ]
     )
-    print(list(map(int, response)))
-
-    return ()
+    # Convert the responses to integers
+    dizaines, centaines, dizaines_de_milliers = map(int, response)
+    # Now convert from hexadecimal representation to decimal
+    dizaines = int(hex(dizaines)[2:])
+    centaines = int(hex(centaines)[2:])
+    dizaines_de_milliers = int(hex(dizaines_de_milliers)[2:])
+    return dizaines + centaines * 100 + dizaines_de_milliers * 10000
 
 
 def get_state():
     # Lire les informations de la mémoire du jeu position du player et soucoupe
     response = comm.communicate(
         [
-            f"read_memory {PacManCoordX}",
+            f"read_memory {AdPillsAccumulator}",
+            f"read_memory {AdPillsAccumulator}",
         ]
     )
-    player_pos = list(map(int, response))
+    player_pos, player_posbis = list(map(int, response))
     return np.array(
         [
             player_pos,
+            player_posbis,
         ]
     )
 
@@ -185,7 +195,13 @@ def nb_parameters(e, H, n, s):
     return parameters
 
 
-def create_fig(nb_parties, scores_moyens, fenetre, epsilons):
+def create_fig(
+    nb_parties,
+    scores_moyens,
+    fenetre,
+    epsilons,
+    filename="evolution_score_moyen_et_epsilon.png",
+):
     import matplotlib.pyplot as plt
 
     print("===> Création du graphe f(épisodes)= scores_moyens")
@@ -238,7 +254,7 @@ def create_fig(nb_parties, scores_moyens, fenetre, epsilons):
     plt.title(f"Evolution du score moyen et d'Epsilon sur {str(nb_parties)} épisodes")
 
     # Sauvegarde du graphique dans un fichier
-    plt.savefig("evolution_score_moyen_et_epsilon.png", dpi=300, bbox_inches="tight")
+    plt.savefig(filename, dpi=300, bbox_inches="tight")
 
     return pente
 
@@ -253,22 +269,23 @@ def main():
     ############################################
     # Taille de l'entrée du réseau de neurones (à adapter en fonction de vos besoins)
     # position pacman X
-    input_size = (1) * N
+    input_size = 2 * N
     nb_hidden_layer = 1
     hidden_size = 10
     output_size = 4  # nb actions
     # multiple state
     state_history = deque(maxlen=N)  # crée un deque avec une longueur maximale de 5
-    learning_rate = 0.001  # 0.01
-    gamma = 0.9999  # 0.99
-    num_episodes = 10000  # nb de partie quasi infini ;-)
-    epsilon_start = 0.99
-    epsilon_end = 0.0
+    learning_rate = 0.01  # 0.01
+    gamma = 0.99  # 0.99
+    num_episodes = 1000
+    0  # nb de partie quasi infini ;-)
+    epsilon_start = 0.5
+    epsilon_end = 0.1
     epsilon_decay = 0.99999  # 0.99999
     epsilon_add = 0.005  # ajoute en fin de partie un peu d'epsilon si score inférieur à la moyenne
     epsilon = epsilon_start
     reward_alive = 0  # 1
-    reward_kill = -5000
+    reward_kill = -100
     reward_mult_step = 0.0  # 0.01
 
     buffer_capacity = 10000  # taille des step cumulés
@@ -276,14 +293,13 @@ def main():
     replay_buffer = ReplayBuffer(buffer_capacity)
 
     # nombre d'info ou commandes à exécuter par frame:
-    # 2 pour connaître l'état du joueur
-    # 3 pour calcul score 2 pour score et un pour status shot
-    # 3 pour l'action (left ou right ou stop ou 1 tir)
-    # récupération des états: 10+1 pos alienY
-    NB_DE_DEMANDES_PAR_FRAME = str(2 + 3 + 3 + 10 + 1)
+    # 2 pour deux entrées bidons
+    # 3 pour calcul score
+    # 4 pour l'action (left ou right ou stop ou 1 tir)
+    NB_DE_DEMANDES_PAR_FRAME = str(11)
 
     # ============================ VITESSE DU JEU ======================================================
-    vitesse_de_jeu = 1
+    vitesse_de_jeu = 10
     NB_DE_FRAMES_STEP = 4  # combien de frame pour un step
     # ==================================================================================================
 
@@ -325,10 +341,11 @@ def main():
         f"[nb_mess_frame={NB_DE_DEMANDES_PAR_FRAME}]"
         f"[nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]"
     )
+    time.sleep(5 / vitesse_de_jeu)
     for episode in range(num_episodes):
         if record:
             recorder.start_recording()
-        step = reward = sum_rewards = player_life_end = player_alive = score = 0
+        step = reward = sum_rewards = player_nb_vies = player_alive = score = 0
         flag_create_fig = False
         # the "F2" key to exit the loop prematurely
         # the "F3" key to reset the debug level.
@@ -337,18 +354,25 @@ def main():
         if f2_pressed:
             print("Sortie prématurée de la boucle 'for'.")
             break
-        response = comm.communicate(["execute Coin_1(1)"])
-        while player_alive == 0:
-            player_alive = int(comm.communicate([f"read_memory {CurrentLives}"])[0])
+        response = comm.communicate(
+            [
+                f"write_memory {AdCredits}(1)",
+            ]
+        )
+        while player_alive == 0:  # En attente que le jeu commence réellement
+            player_alive = int(comm.communicate([f"read_memory {AdPlayerAlive}"])[0])
+        player_nb_vies = (
+            3  # on entre dans le jeu en début de partie on est sur que l'on a 3 vies...
+        )
+        flag_in_game = False
         # Remplit le deque avec des vecteurs d'état non nuls avec le même état de départ...
         for _ in range(N):
             state_history.append(get_state())
         state = np.concatenate(state_history)
-        while player_alive >= 1:
-            while step == 0:
-                time.sleep(5 / vitesse_de_jeu)  # attendre 5 secondes au début
-                step += 1
+        while player_nb_vies > 0:
+            if not flag_in_game:
                 comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
+                flag_in_game = True
             # Vérifier si la touche "esc" est pressée
             if keyboard.is_pressed("f2"):
                 print("Touche 'F2' détectée. Sortie prématurée de la boucle.")
@@ -364,13 +388,13 @@ def main():
             elif keyboard.is_pressed("f7") and not flag_create_fig:
                 print("<=== Demande création d'une figure des scores/episodes")
                 flag_create_fig = True
-            player_life_end, player_alive = list(
+            player_nb_vies, player_alive = list(
                 map(
                     int,
                     comm.communicate(
                         [
-                            f"read_memory {CurrentLives}",
-                            f"read_memory {CurrentLives}",
+                            f"read_memory {AdNbPlayerLive}",
+                            f"read_memory {AdPlayerAlive}",
                         ]
                     ),
                 )
@@ -381,22 +405,21 @@ def main():
             executer_action(action)
             _last_score = score
             score = get_score()
-            reward = (
-                round(score + step * reward_mult_step)
-                + (reward_kill if player_life_end < 255 else reward_alive)
+            reward = round(
+                score
+                + step * reward_mult_step
+                + (reward_kill if player_alive == 0 else reward_alive)
                 - _last_score
             )
+
             # Mettre à jour le réseau de neurones
             state_history.append(
                 get_state()
             )  # ajouter un état dans la collection history actuellement pas utilisé capacity=1
             next_state = np.concatenate(state_history)  # un seul vecteur aplatit
-            done = player_alive == 0  # done = fin d'épisode
-            if debug >= 2:
-                print(f"state={state}\nnext ={next_state}")
-            reward += (
-                next_state[-1] - state[-1]
-            ) * 20  # pénalité lorsque l'alien ref Y diminue (descente des aliens)
+            done = (
+                player_nb_vies == 1 and player_alive == 0
+            )  # done = fin d'épisode (vient juste de mourir et il ne restait qu'une vie
             sum_rewards += reward
             replay_buffer.push(state, action, reward, next_state, done)
             state = next_state
@@ -444,14 +467,27 @@ def main():
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            if player_life_end < 255:  # fin du joueur
-                comm.communicate(["wait_for 0"])
-                time.sleep(3 / vitesse_de_jeu)  # attendre 3 secondes si vitesse normal
-                comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
+            while (
+                player_alive == 0 and player_nb_vies > 0
+            ):  # En attente que le jeu recommence réellement si mort d'une vie
+                if flag_in_game:
+                    response = comm.communicate(["wait_for 0"])
+                    flag_in_game = False
+                player_nb_vies, player_alive = list(
+                    map(
+                        int,
+                        comm.communicate(
+                            [
+                                f"read_memory {AdNbPlayerLive}",
+                                f"read_memory {AdPlayerAlive}",
+                            ]
+                        ),
+                    )
+                )
             # Insérer ici le code pour sauvegarder le modèle, afficher les statistiques, etc.
             if debug >= 1:
                 print(
-                    f"action={actions[action]:<8}episode={episode:<5d}player_kill={player_life_end:<4d}player_end_game={player_alive:<2d}reward={reward:<5d}all rewards={sum_rewards:<6d}nb_mess_step={comm.number_of_messages:<4d}nb_step={step:<5d}score={score:<5d}"
+                    f"action={actions[action]:<8}episode={episode:<5d}player dans le jeu={player_alive:<2d}nb_vies={player_nb_vies:<2d}reward={reward:<5d}all rewards={sum_rewards:<6d}nb_mess_step={comm.number_of_messages:<4d}nb_step={step:<5d}score={score:<5d}"
                 )
             comm.number_of_messages = 0
         # fin de partie
@@ -507,6 +543,18 @@ def main():
         print(recorder.stop_recording())
         time.sleep(5)
         print(recorder.ws.disconnect())
+
+    print(
+        create_fig(
+            episode,
+            list_of_mean_scores,
+            fenetre_du_calcul_de_la_moyenne,
+            list_of_epsilons,
+            filename="last_fig.png",
+        )
+    )
+
+    print(process.terminate())
 
 
 if __name__ == "__main__":
