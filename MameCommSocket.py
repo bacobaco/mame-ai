@@ -1,6 +1,9 @@
 
 import time
 import socket
+import base64
+import zlib
+
 
 class MameCommunicator:
     def __init__(self, host="127.0.0.1", port=12345):
@@ -8,7 +11,7 @@ class MameCommunicator:
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
-        self.sock.settimeout(22)  # 22 secondes de délai pur attendre la réponse
+        self.sock.settimeout(1000) 
         self.number_of_messages=0
         self.debug = False
 
@@ -19,14 +22,26 @@ class MameCommunicator:
         if self.debug:
             print(f"MameCommunicator Send2LUA: {message_str}")
 
+
     def receive_from_lua(self):
-        data = []
-        messages = self.sock.recv(1024).decode()
-        data = messages.split("\n")
-        data = data[:-2]
-        if self.debug:
-            print(f"MameCommunicator ReceiveFromLUA: {data}")
-        return data
+        try:
+            # Réception des données brutes compressées
+            data = self.sock.recv(1024)  # Lire jusqu'à 4 KB (ajuster si nécessaire)
+
+            if not data:  # Vérifier si le socket a renvoyé des données vides
+                return []
+
+            # Décompresser avec zlib et convertir en texte
+            decompressed_data = zlib.decompress(data).decode()
+
+            # Découper les messages
+            messages = decompressed_data.split("\n")
+
+            return [msg for msg in messages if msg]  # Supprimer les lignes vides
+
+        except Exception as e:
+            print(f"Erreur de réception/décompression: {e}")
+            return []
 
     def communicate(self, messages):
         self.send_to_lua(messages)

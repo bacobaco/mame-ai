@@ -1,0 +1,71 @@
+Résultats test DDQN sur pacman
+===============================
+Aléatoire1 170 parties (action/frame=1) => bouge tout le temps et reste autour de son point de départ 192pts (vitesse ~800%)
+Aléatoire2 200 parties (action/frame=1/10) => résultat incroyable autour de 640 pts (hs=1690!)! (vitesse >3000%!)
+Aléatoire3 250 parties (action/frame=1/20) => résultat incroyable autour de 740 pts ! (hs=1420)
+Aléatoire4 250 parties (action/frame=1/30) => résultat en léger retrait autour de  700pts !
+Aléatoire5 300 parties (action/frame=1/40) => résultat 630pts (hs=1770!)
+
+
+
+1[input=10*1=10][hidden=10*1#154][output=4][gamma=0.9999][learning=0.001][reward_kill=-500][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay, add=0.99,0.02,0.99999,0.0005][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=1][speed=10]
+=> speed max 300%, parfait monté jusque 200 parties puis palier vers 650pts...
+
+2[input=10*1=10][hidden=22*1#334][output=4][gamma=0.9999][learning=0.001][reward_kill=-500][reward_alive=0][reward_step=0.0]
+[epsilon start, end, decay, add=0.99,0.02,0.99999,0.0005][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=2][speed=5]
+=>après 2500 parties plateau autour de 620 pts... (dès 500 parties le match était joué). Je relance sans buffer replay avec e=0.5,
+après 200 partie converge vers 620 après un max à  730 pts... 
+
+3[input=10*1=10][hidden=50*1#754][output=4][gamma=0.9999][learning=0.001][reward_kill=-300][reward_alive=-1][reward_step=0]
+[epsilon start=0.72 end=0.0 decay=0.999990 add=0.0][Replay_size=100000&_samples=10000][nb_mess_frame=19][nb_step_frame=10][speed=5]
+=> après 140, 500 et 2000 parties utilisation d'un énorme replay. après un gros creux de 800 à 650pts vers 1000 parties cumulées,
+ on monte très lentement : vers 850pts
+
+4[input=10*1=10][hidden=50*1#754][output=4][gamma=0.99999][learning=0.001][reward_kill=-500][reward_alive=-2][reward_step=0]
+[epsilon start=1 end=0.0 decay=0.999987 add=0.0][Replay_size=10000&_samples=1000][nb_mess_frame=19][nb_step_frame=8][speed=5]
+=> je limite le frame rate pour avoir des states intermédiaires et limite replay buffer
+1000 parties 600pts (max 750pts); je relance e=0.7 et decay 0.99999, tourne autour de 725pts (plein de creux/sommets) après 3200parties
+
+
+#### Changement de la politique d'epsilon, uniquement en fin de partie et pénalité reward si position du joueur stableDaniel Dionmaya
+
+5[input=10*1=10][hidden=50*1#754][output=4][gamma=0.99999][learning=0.001][reward_kill=-500][reward_alive=-2][reward_step=0]
+[epsilon start=1 end=0.0 decay=0.933033 add=0.0][Replay_size=20000&_samples=2000][nb_mess_frame=19][nb_step_frame=20][speed=5]
+=> 7000parties! grosse variation p5.png avec un max mean 870 mais finalement autour 750pts (comme l'aléatoire3!)
+
+6[input=10*1=10][hidden=50*1#754][output=4][gamma=0.99999][learning=0.001][reward_kill=-500][reward_alive=-2][reward_step=0]
+[epsilon start=1 end=0.0 decay=0.933033 add=0.0][Replay_size=20000&_samples=2000][nb_mess_frame=19][NB_STEP_FRAME=10][speed=5]
+=> après 3000parties semble converger vers 750pts dès les 1000parties
+
+
+###### Utilisation des distances du joueur et des fantômes plutôt que les coord. des fantômes 2+4 entrées
+
+7[INPUT=6*1=6][hidden=50*1#554][output=4][GAMMA=0.99999][learning=0.001][reward_kill=-500][reward_alive=1][reward_step=0]
+[epsilon start=1 end=0.0 decay=0.989519 add=0.0][Replay_size=20000&_samples=2000][nb_mess_frame=19][nb_step_frame=10][speed=5]
+=> 10000parties pour une décroissance de 700 à 625pts, décevant... moins bon que l'aléatoire2 !
+
+8[input=6*1=6][hidden=30*2#1264][output=4][gamma=0.99999][learning=0.001][reward_kill=-10000][reward_alive=1][reward_step=0]
+[epsilon start=0.394 end=0.01 decay=0.989519 add=0.0][Replay_size=20000&_samples=2000][nb_mess_frame=19][nb_step_frame=10][speed=5]
+=> après 3000 parties pas de convergence autour de 650pts comme l'aléatoire2 décevant...
+
+
+################ Je reviens aux positions des fantomes... en gardant la normalisation...
+
+9[input=10*1=10][hidden=22*1#334][output=4][gamma=0.99999][learning=0.001][reward_kill=-10000][reward_alive=1][reward_step=0]
+[epsilon start=0.22 end=0.01 decay=0.98 add=0.0][Replay_size=20000&_samples=2000][nb_mess_frame=19][nb_step_frame=10][speed=5]
+=> 7000 parties en exploration (descente jusque e=0.2) (oscillation entre 550-850pts) puis exploitation 1000parties catastrophique autour de 540pts
+ 
+########### J'ajoute la "videoram" (1024 entrées) et Normalisation à // 1 je reviens à la base => low gamma...
+
+10[input=1034*1=1034][hidden=10*1#10394][output=4][gamma=0.9][learning=0.1][reward_kill=-1000000][reward_step=-0.1]
+[epsilon start=0.49 end=0.00 decay=0.97915 add=0.00][Replay_size=10000&_samples=1000][nb_mess_frame=1043][nb_step_frame=5][speed=5]
+apres100+2500 parties décroissance 550pts...
+
+11[input=1034*1=1034][HIDDEN=20*1#20784][output=4][GAMMA=0.999][LEARNING=0.001][reward_kill=-1000000][reward_step=-0.1]
+[epsilon start=0.50 end=0.00 decay=0.98952 add=0.00][Replay_size=20000&_samples=2000][nb_mess_frame=1043][nb_step_frame=10][speed=5]
+5000parties pour une décroissance moyenne autour de 660pts... (en exploitation c catastrophique 400pts)
+
+12[input=1034*1=1034][hidden=20*1#20784][output=4][GAMMA=0.99999][learning=1e-05][reward_kill=-25000000][reward_step=1]
+[epsilon start=0.90 end=0.00 decay=0.98952 add=0.00][Replay_size=200000&_samples=2000][nb_mess_frame=1043][nb_step_frame=10][speed=5]
+1000 parties 660pts... exploitation nulle ! 4000 parties de plus exploitation nulle, y"a forcément un problème
