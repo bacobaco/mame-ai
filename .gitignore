@@ -24,7 +24,6 @@
 /invaders_q.lua
 /json
 /layout
-/LISMOI.TXT
 /lua/*
 !/lua/luasocket-3.1.0
 /lua/luasocket-3.1.0/*
@@ -60,3 +59,22 @@ openh264-1.8.0-win64.dll
 1260.avi
 ds8.pth
 ds7.pth
+/0-old_code
+!/socket\ \[à\ mettre\ au\ niveau\ de\ mame\]/
+socket\ \[à\ mettre\ au\ niveau\ de\ mame\]/*
+!/socket\ \[à\ mettre\ au\ niveau\ de\ mame\]/core.dll
+/runs/*
+/models-png-pacman
+/test*.*
+!/test_neurones.py
+/*.pth
+/*.png
+invaders.txt
+invaders.buffer
+invaders_cnn_double=True_N=2_i=(2, 96, 88)_hl=1,512_batch=20000,32_l=0.00025_g=0.99\[NoisyNet]_nb=4871_ms=322_hs=1230.buffer
+MameCommSocket.txt
+plugins - Raccourci.lnk
+PythonBridgeSocket_12346.lua.bak
+PythonBridgeSocket.txt
+resultats_invaders.txt
+/logs
