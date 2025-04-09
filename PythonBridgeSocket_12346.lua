@@ -11,7 +11,7 @@ local flag = 0
 local flag_wait_for = false
 local frame = 0
 local latence = 0.0
-local port_game = 12345
+local port_game = 12346
 
 -- Récupère le nom du "romset" en cours d'émulation
 local game = emu.romname()
@@ -45,7 +45,7 @@ end
 --------------------------------------------------------------------------------
 local jeu
 if game == "invaders" then
-    port_game = 12345
+    -- port_game = 12345
     in0 = ioport.ports[":CONTP1"]
     in1 = ioport.ports[":IN1"]
     jeu = {

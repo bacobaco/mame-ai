@@ -26,17 +26,13 @@ class MameCommunicator:
     def receive_from_lua(self):
         try:
             # Réception des données brutes compressées
-            data = self.sock.recv(1024)  # Lire jusqu'à 4 KB (ajuster si nécessaire)
-
+            data = self.sock.recv(4096)  # Lire jusqu'à 4 KB (ajuster si nécessaire)
             if not data:  # Vérifier si le socket a renvoyé des données vides
                 return []
-
             # Décompresser avec zlib et convertir en texte
             decompressed_data = zlib.decompress(data).decode()
-
             # Découper les messages
             messages = decompressed_data.split("\n")
-
             return [msg for msg in messages if msg]  # Supprimer les lignes vides
 
         except Exception as e:
