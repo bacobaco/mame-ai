@@ -1,7 +1,10 @@
-# Dans AI_Mame.py
+# info sur les paramètres et résultats de rainbow
+# https://paperswithcode.com/paper/rainbow-combining-improvements-in-deep/review/?hl=19877
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
+import math
 import numpy as np
 from collections import deque
 import random, os, sys
@@ -11,6 +14,7 @@ from datetime import datetime
 import atexit
 from flask import Flask, send_from_directory, render_template_string
 from colorama import Fore, Style
+import time
 
 class GraphWebServer:
     def __init__(
@@ -169,196 +173,184 @@ class TrainingConfig:
     epsilon_decay: float
     epsilon_add: float
     buffer_capacity: int
-    batch_size: int
+    current_episode: int = 0  # episode courant
+    rainbow_eval: int = 200_000 # Nombre de step avant chaque phase d'évaluation Rainbow (250_000 dans Rainbow)
+    rainbow_eval_pourcent: int = 3 # Pourcentage du temps d'évaluation (5% = pourcentage du nb de step d'évaluation)
+    batch_size: int = 32  # Taille du batch pour l'entraînement
+    min_history_size: int = 0  # Taille minimale du buffer avant d'entraîner
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
+    #device: str = "cpu"  # Utiliser CPU pour le débogage
     double_dqn: bool = False  # Active le Double DQN si True
+    target_update_freq: int = 32000  # 🔁 Fréquence de mise à jour du réseau cible
+    dueling: bool = False  # 🆕 Active le Dueling DQN
     prioritized_replay: bool = False
+    nstep: bool = False   # ← option nstep activable
+    nstep_n: int = 3      # ← valeur par défaut (3 ou 5)
     model_type: str = "mlp"  # Choix de l'architecture : "mlp" ou "cnn"
     cnn_type: str = "default"  # ✅ AJOUTER ICI
     state_extractor: callable = None  # Fonction d'extraction d'état
     mode: str = (
         "exploration"  # "exploration" pour l'entraînement, "exploitation" (inference) pour la phase finale
     )
-    target_update_freq: int = 5000  # 🔁 Fréquence de mise à jour du réseau cible
 
 class GPUReplayBuffer:
-    def __init__(self, capacity, config, prioritized=True, alpha=0.6):
+    def __init__(self, capacity, config, prioritized=False, alpha=0.5, optimize_memory=False):
         self.capacity = capacity
         self.config = config
         self.device = torch.device(config.device)
         self.prioritized = prioritized
+        self.optimize_memory = optimize_memory
         self.pos = 0
         self.size = 0
 
-        # Déterminer la forme d'un état selon le type de modèle
-        if config.model_type.lower() == "cnn":
-            state_shape = config.input_size  # ex: (channels, height, width)
+        if config.model_type.lower() == "cnn" and self.optimize_memory:
+            self.store_on_cpu = True
+            state_shape = config.input_size  # (C, H, W)
+            self.states = np.empty((capacity, *state_shape), dtype=np.uint8)
+            self.next_states = np.empty((capacity, *state_shape), dtype=np.uint8)
         else:
-            state_shape = (config.input_size * config.state_history_size,)
+            self.store_on_cpu = False
+            if config.model_type.lower() == "cnn":
+                state_shape = config.input_size
+            else:
+                state_shape = (config.input_size * config.state_history_size,)
 
-        # Préallouer les tenseurs sur GPU
-        self.states = torch.empty(
-            (capacity, *state_shape), dtype=torch.float32, device=self.device
-        )
-        self.next_states = torch.empty(
-            (capacity, *state_shape), dtype=torch.float32, device=self.device
-        )
+            self.states = torch.empty((capacity, *state_shape), dtype=torch.float32, device=self.device)
+            self.next_states = torch.empty((capacity, *state_shape), dtype=torch.float32, device=self.device)
+
         self.actions = torch.empty((capacity,), dtype=torch.int64, device=self.device)
         self.rewards = torch.empty((capacity,), dtype=torch.float32, device=self.device)
         self.dones = torch.empty((capacity,), dtype=torch.float32, device=self.device)
 
         if self.prioritized:
-            # Stocker les priorités directement sur GPU
-            self.priorities = torch.zeros(
-                capacity, dtype=torch.float32, device=self.device
-            )
+            self.priorities = torch.zeros(capacity, dtype=torch.float32, device=self.device)
             self.alpha = alpha
-            self.beta = 0.4  # Valeur initiale
-            self.beta_increment = 0.000001
-        else:
-            self.priorities = None
+            self.beta = 0.4
+            self.beta_increment = (1.0 - self.beta) / (self.capacity / 2)
+
 
     def push(self, state, action, reward, next_state, done):
-        # Convertir state et next_state en tenseurs sur GPU si besoin
-        if not torch.is_tensor(state):
-            state = torch.tensor(state, dtype=torch.float32, device=self.device)
-        if not torch.is_tensor(next_state):
-            next_state = torch.tensor(
-                next_state, dtype=torch.float32, device=self.device
-            )
         if self.config.model_type.lower() == "mlp":
             state = state.flatten()
             next_state = next_state.flatten()
 
-        self.states[self.pos].copy_(state)
+        if self.store_on_cpu:
+            self.states[self.pos] = (state * 255).astype(np.uint8)
+            self.next_states[self.pos] = (next_state * 255).astype(np.uint8)
+        else:
+            if not torch.is_tensor(state):
+                state = torch.tensor(state, dtype=torch.float32, device=self.device)
+            if not torch.is_tensor(next_state):
+                next_state = torch.tensor(next_state, dtype=torch.float32, device=self.device)
+            self.states[self.pos].copy_(state)
+            self.next_states[self.pos].copy_(next_state)
+
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
-        self.next_states[self.pos].copy_(next_state)
         self.dones[self.pos] = float(done)
 
         if self.prioritized:
-            # Utiliser la valeur maximale actuelle ou 1.0 par défaut
             max_priority = self.priorities[: self.size].max() if self.size > 0 else 1.0
             self.priorities[self.pos] = max_priority
 
         self.pos = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
+
+            
     def sample(self, batch_size, beta=None):
-        if self.size == 0:
-            return None
+        indices = torch.randint(0, self.size, (batch_size,), device=self.device)
+        weights = torch.ones(batch_size, device=self.device)
+        if self.store_on_cpu:
+            states_batch = torch.tensor(self.states[indices.cpu().numpy()], dtype=torch.float32, device=self.device) / 255.0
+            next_states_batch = torch.tensor(self.next_states[indices.cpu().numpy()], dtype=torch.float32, device=self.device) / 255.0
+        else:
+            states_batch = self.states.index_select(0, indices)
+            next_states_batch = self.next_states.index_select(0, indices)
+
+        actions_batch = self.actions.index_select(0, indices)
+        rewards_batch = self.rewards.index_select(0, indices)
+        dones_batch = self.dones.index_select(0, indices)
+
         if self.prioritized:
-            if beta is None:
-                beta = self.beta
-            # Calculer les probabilités d'échantillonnage sur GPU
             prios = self.priorities[: self.size] ** self.alpha
             probs = prios / prios.sum()
-            # torch.multinomial pour échantillonner les indices
             indices = torch.multinomial(probs, batch_size, replacement=False)
-            weights = (self.size * probs[indices]) ** (-beta)
+            weights = (self.size * probs[indices]) ** (-beta if beta else self.beta)
             weights = weights / weights.max()
-            states_batch = self.states.index_select(0, indices)
-            actions_batch = self.actions.index_select(0, indices)
-            rewards_batch = self.rewards.index_select(0, indices)
-            next_states_batch = self.next_states.index_select(0, indices)
-            dones_batch = self.dones.index_select(0, indices)
             self.beta = min(1.0, self.beta + self.beta_increment)
-            return (
-                states_batch,
-                actions_batch,
-                rewards_batch,
-                next_states_batch,
-                dones_batch,
-                indices,
-                weights,
-            )
-        else:
-            # Échantillonnage uniforme sur GPU
-            indices = torch.randperm(self.size, device=self.device)[:batch_size]
-            weights = torch.ones(batch_size, device=self.device)
-            states_batch = self.states.index_select(0, indices)
-            actions_batch = self.actions.index_select(0, indices)
-            rewards_batch = self.rewards.index_select(0, indices)
-            next_states_batch = self.next_states.index_select(0, indices)
-            dones_batch = self.dones.index_select(0, indices)
-            return (
-                states_batch,
-                actions_batch,
-                rewards_batch,
-                next_states_batch,
-                dones_batch,
-                indices,
-                weights,
-            )
+
+        return (
+            states_batch,
+            actions_batch,
+            rewards_batch,
+            next_states_batch,
+            dones_batch,
+            indices,
+            weights,
+        )
+
 
     def update_priorities(self, batch_indices, batch_priorities):
         if self.priorities is None:
             return
-        self.priorities[batch_indices] = batch_priorities
+        self.priorities[batch_indices] = batch_priorities.detach().abs()
 
     def __len__(self):
         return self.size
+class NStepTransitionWrapper:
+    def __init__(self, n, gamma):
+        self.n = n
+        self.gamma = gamma
+        self.buffer = []
+    
+    def append(self, state, action, reward, done, next_state):
+        self.buffer.append((state, action, reward, done, next_state))
+        if len(self.buffer) < self.n and not done:
+            return None  # Pas assez pour un n-step
 
-class OLD_NoisyLinear(nn.Module):
-    def __init__(self, in_features, out_features, sigma_init=0.017):
-        super(NoisyLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-
-        # Learnable parameters
-        self.mu_weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.sigma_weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.register_buffer("epsilon_weight", torch.zeros(out_features, in_features))
-
-        self.mu_bias = nn.Parameter(torch.empty(out_features))
-        self.sigma_bias = nn.Parameter(torch.empty(out_features))
-        self.register_buffer("epsilon_bias", torch.zeros(out_features))
-
-        self.sigma_init = sigma_init
-        self.reset_parameters()
-        self.reset_noise()
-
-    def reset_parameters(self):
-        mu_range = 1 / self.in_features**0.5
-        self.mu_weight.data.uniform_(-mu_range, mu_range)
-        self.mu_bias.data.uniform_(-mu_range, mu_range)
-        self.sigma_weight.data.fill_(self.sigma_init)
-        self.sigma_bias.data.fill_(self.sigma_init)
-
-    def _scale_noise(self, size):
-        x = torch.randn(size)
-        return x.sign().mul_(x.abs().sqrt_())
-
-
-    def reset_noise(self):
-        device = self.mu_weight.device  # Récupère le bon device (CPU ou GPU)
-
-        epsilon_in = self._scale_noise(self.in_features).to(device)
-        epsilon_out = self._scale_noise(self.out_features).to(device)
-
-        self.epsilon_weight = epsilon_out.ger(epsilon_in)  # Produit extérieur (outer product)
-        self.epsilon_bias = epsilon_out
-
-
-    def forward(self, x):
-        if self.training:
-            weight = self.mu_weight + self.sigma_weight * self.epsilon_weight
-            bias = self.mu_bias + self.sigma_bias * self.epsilon_bias
+        R, next_s, d = 0, None, False
+        for i in range(len(self.buffer)):
+            r = self.buffer[i][2]
+            R += (self.gamma ** i) * r
+            if self.buffer[i][3]:  # done
+                d = True
+                next_s = self.buffer[i][4]
+                break
         else:
-            weight = self.mu_weight
-            bias = self.mu_bias
-        return torch.nn.functional.linear(x, weight, bias)
+            next_s = self.buffer[-1][4]
+            d = self.buffer[-1][3]
 
-    def get_sigma(self):
-        return self.sigma_weight.abs().mean().item(), self.sigma_bias.abs().mean().item()
+        first = self.buffer[0]
+        nstep_transition = (first[0], first[1], R, next_s, d)
+        self.buffer.pop(0)
+        return nstep_transition
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
+    def flush(self):
+        result = []
+        while self.buffer:
+            # Pour forcer le vidage sans dépendre de append
+            state, action, _, _, _ = self.buffer[0]
+            R, next_s, d = 0, None, False
+            for i in range(len(self.buffer)):
+                r = self.buffer[i][2]
+                R += (self.gamma ** i) * r
+                if self.buffer[i][3]:  # done
+                    d = True
+                    next_s = self.buffer[i][4]
+                    break
+            else:
+                next_s = self.buffer[-1][4]
+                d = self.buffer[-1][3]
+
+            nstep_transition = (state, action, R, next_s, d)
+            result.append(nstep_transition)
+            self.buffer.pop(0)
+        return result
+
 
 class NoisyLinear(nn.Module):
-    def __init__(self, in_features, out_features, sigma_init=0.017):
+    def __init__(self, in_features, out_features, sigma_init=0.5):
         super(NoisyLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -383,12 +375,17 @@ class NoisyLinear(nn.Module):
         mu_range = 1 / math.sqrt(self.in_features)
         self.mu_weight.data.uniform_(-mu_range, mu_range)
         self.mu_bias.data.uniform_(-mu_range, mu_range)
-        self.sigma_weight.data.fill_(self.sigma_init)
-        self.sigma_bias.data.fill_(self.sigma_init)
+        
+        # Ne pas réinitialiser sigma s'il a déjà été mis à jour
+        if self.sigma_weight.data.mean() == self.sigma_init:
+            self.sigma_weight.data.fill_(self.sigma_init)
+            self.sigma_bias.data.fill_(self.sigma_init)
 
     def _scale_noise(self, size):
+        # Version améliorée de la génération de bruit factoriel
+        # plus stable pour l'apprentissage
         x = torch.randn(size)
-        return x.sign().mul_(x.abs().sqrt_())
+        return x.sign() * torch.sqrt(torch.abs(x))
 
     def reset_noise(self):
         device = self.mu_weight.device
@@ -415,8 +412,7 @@ class NoisyLinear(nn.Module):
 #  precise    | 2       | Non         | Oui     | ~64×26×28      | Moyen + FC lourd | 🟡 Moyen Lent #
 #  original   | 3       | Oui (4,2,2) | Non     | ~128×13×14     | Conv rapide      | 🟢 Rapide     #
 #  deepmind   | 3       | Oui (4,2,1) | Non     | ~64×11×12      | Léger + FC 512   | ✅ Efficace   #
-
-
+#####################################################################################################
 class DQNModel(nn.Module):
     """
     DQNModel est une architecture de réseau neuronal modulaire utilisée pour l'entraînement par renforcement
@@ -493,39 +489,63 @@ class DQNModel(nn.Module):
             self.fc1 = Linear(self.flatten_size, config.hidden_size)
             self.bn_fc1 = nn.BatchNorm1d(config.hidden_size)
             self.act_fc1 = nn.LeakyReLU(0.01)
-            self.fc2 = Linear(config.hidden_size, config.output_size)
+            if config.dueling:
+                self.value_head = Linear(config.hidden_size, 1)
+                self.advantage_head = Linear(config.hidden_size, config.output_size)
+            else:
+                self.output_layer = Linear(config.hidden_size, config.output_size)
 
         elif config.model_type == "mlp":
-            input_dim = (
-                99 if config.state_extractor else int(np.prod(config.input_size))
-            )
-            self.fc1 = Linear(input_dim, config.hidden_size)
-            self.bn_fc1 = nn.BatchNorm1d(config.hidden_size)
-            self.act_fc1 = nn.LeakyReLU(0.01)
-            self.fc2 = Linear(config.hidden_size, config.output_size)
+            input_dim = int(np.prod(config.input_size)) * config.state_history_size
+
+            self.mlp_layers = nn.ModuleList()
+            in_dim = input_dim
+            for _ in range(config.hidden_layers):
+                self.mlp_layers.append(Linear(in_dim, config.hidden_size))
+                in_dim = config.hidden_size
+
+            if config.dueling:
+                self.value_head = Linear(in_dim, 1)
+                self.advantage_head = Linear(in_dim, config.output_size)
+            else:
+                self.output_layer = Linear(in_dim, config.output_size)
+
+            self.activation = nn.LeakyReLU(0.01)
+
 
         else:
             raise NotImplementedError("Unknown model_type")
 
     def forward(self, x):
-        if self.config.model_type == "cnn":
-            x = self.encoder(x)
-            x = x.view(x.size(0), -1)
-        elif self.config.model_type == "mlp":
-            x = x.view(x.size(0), -1)
+        # Cas CNN
+        if self.config.model_type.lower() == "cnn":
+            # 1) Encodage convolutionnel
+            x = self.encoder(x)                         # -> (batch, C', H', W')
+            # 2) Flatten
+            x = x.view(x.size(0), -1)                   # -> (batch, flatten_size)
+            # 3) Fully‑connected + BatchNorm + activation
+            x = self.act_fc1(self.bn_fc1(self.fc1(x)))  # -> (batch, hidden_size)
+            # 4) Tête du réseau (dueling ou non)
+            if self.config.dueling:
+                value     = self.value_head(x)          # -> (batch, 1)
+                advantage = self.advantage_head(x)      # -> (batch, output_size)
+                # recombinaison dueling
+                return value + (advantage - advantage.mean(dim=1, keepdim=True))
+            else:
+                return self.output_layer(x)             # -> (batch, output_size)
+
+        # Cas MLP (vecteur d’état)
         else:
-            raise NotImplementedError("Unknown model_type")
-
-        x = self.fc1(x)
-
-        # ⚠️ Applique BatchNorm uniquement si use_noisy est désactivé
-        if not self.config.use_noisy:
-            x = self.bn_fc1(x)
-
-        x = self.act_fc1(x)
-        x = self.fc2(x)
-        return x
-
+            # x est déjà de forme (batch, input_dim) après state_hist concatenation
+            for layer in self.mlp_layers:
+                x = layer(x)
+                x = self.activation(x)
+            if self.config.dueling:
+                value     = self.value_head(x)
+                advantage = self.advantage_head(x)
+                return value + (advantage - advantage.mean(dim=1, keepdim=True))
+            else:
+                return self.output_layer(x)
 
     def get_sigma_values(self):
         return {
@@ -541,7 +561,6 @@ class DQNModel(nn.Module):
             if isinstance(module, NoisyLinear):
                 module.reset_noise()
 
-
 class DQNTrainer:
     def __init__(self, config: TrainingConfig):
         self.config = config
@@ -551,251 +570,210 @@ class DQNTrainer:
         self.dqn = DQNModel(config).to(self.device)
         self.target_dqn = DQNModel(config).to(self.device)
         self.copy_weights(self.dqn, self.target_dqn)
-
+        self.set_mode(config.mode)
         # Initialisation des autres composants d'entraînement...
-        self.optimizer = optim.Adam(self.dqn.parameters(), lr=config.learning_rate)
+        self.optimizer = optim.Adam(self.dqn.parameters(), lr=config.learning_rate,eps=1.5e-4)
+        #self.optimizer = optim.SGD(self.dqn.parameters(), lr=config.learning_rate)
+
         self.criterion = nn.MSELoss()
         # Utilisation du ReplayBuffer classique (échantillonnage uniforme)
         self.replay_buffer = GPUReplayBuffer(
-            config.buffer_capacity, config, prioritized=config.prioritized_replay
+            config.buffer_capacity, config, prioritized=config.prioritized_replay, optimize_memory=(config.model_type == "cnn")
         )
 
+        if config.nstep:
+            self.nstep_wrapper = NStepTransitionWrapper(config.nstep_n, config.gamma)
+        else:
+            self.nstep_wrapper = None
         self.epsilon = config.epsilon_start
         self.state_history = deque(maxlen=config.state_history_size)
         self.criterion = nn.SmoothL1Loss(reduction="none")  # ✅ Rainbow-style
 
         self.training_steps = 0
+        self.eval_steps = 0
 
     @staticmethod
     def copy_weights(source: nn.Module, target: nn.Module) -> None:
         """Copie les poids du réseau source vers le réseau cible"""
         target.load_state_dict(source.state_dict())
-
+    def set_mode(self, mode: str = "exploration"):
+        self.config.mode = mode.lower()
+        if self.config.mode == "exploitation":
+            self.dqn.eval()
+            self.target_dqn.eval()
+        else:
+            self.dqn.train()
+            self.target_dqn.train()    
+            
     def select_action(self, state: np.ndarray) -> int:
         state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
 
         if self.config.use_noisy:
-            self.dqn.reset_noise()  # 🧠 Reset du bruit à chaque décision
-
-        with torch.no_grad():
+            if self.config.mode != "exploitation":
+                self.dqn.reset_noise()  # <--- bruit à chaque step
             was_training = self.dqn.training
             self.dqn.eval()
-            q_values = self.dqn(state_tensor)
-            if was_training and self.config.mode.lower() != "exploitation":
+            with torch.no_grad():
+                q_values = self.dqn(state_tensor)
+            if was_training:
                 self.dqn.train()
-
-        if self.config.mode.lower() == "exploitation":
             return torch.argmax(q_values).item()
         else:
-            if self.config.use_noisy:
+            # Version epsilon-greedy classique
+            if self.config.mode == "exploitation" or self.epsilon == 0:
+                was_training = self.dqn.training
+                self.dqn.eval()
+                with torch.no_grad():
+                    q_values = self.dqn(state_tensor)
+                if was_training:
+                    self.dqn.train()
                 return torch.argmax(q_values).item()
-            elif random.random() < self.epsilon:
-                return random.randint(0, self.config.output_size - 1)
             else:
-                return torch.argmax(q_values).item()
-
-    def update_epsilon(self) -> None:
-        if self.config.use_noisy or self.config.mode.lower() == "exploitation":
-            return
-        if self.config.epsilon_decay > 0:  # cas décroissance exponentielle decay
-            self.epsilon = max(
-                min(
-                    self.epsilon * self.config.epsilon_decay, self.config.epsilon_start
-                ),
-                self.config.epsilon_end,
-            )
-        else:  # cas décroissance linéaire
-            self.epsilon = max(
-                min(
-                    self.epsilon - self.config.epsilon_linear, self.config.epsilon_start
-                ),
-                self.config.epsilon_end,
-            )
-
-        if (
-            self.config.mode.lower() == "exploitation"
-            or len(self.replay_buffer) < self.config.batch_size
-        ):
-            return None
-
-        (
-            state_batch,
-            action_batch,
-            reward_batch,
-            next_state_batch,
-            done_batch,
-            indices,
-            weights,
-        ) = self.replay_buffer.sample(self.config.batch_size)
-
-        # Assurer la bonne forme des états
-        if self.config.model_type.lower() == "mlp":
-            state_batch = state_batch.view(self.config.batch_size, -1)
-            next_state_batch = next_state_batch.view(self.config.batch_size, -1)
-        elif self.config.model_type.lower() == "cnn":
-            state_batch = state_batch.view(
-                self.config.batch_size, *self.config.input_size
-            )
-            next_state_batch = next_state_batch.view(
-                self.config.batch_size, *self.config.input_size
-            )
-
-        action_batch = action_batch.unsqueeze(-1)
-
-        # --- Forward des Q-values actuelles ---
-        if self.config.use_noisy:
-            self.dqn.reset_noise()
-            self.target_dqn.reset_noise()
-        q_values = self.dqn(state_batch)
-        if self.config.use_noisy:
-            curr_q_values = q_values.gather(1, action_batch).reshape(-1)
-        else:
-            curr_q_values = q_values.gather(1, action_batch).squeeze(-1)
-
-        # --- Target Q-values ---
-        with torch.no_grad():
-            if self.config.double_dqn:
-                dqn_out = self.dqn(next_state_batch)
-                target_out = self.target_dqn(next_state_batch)
-                best_actions = dqn_out.argmax(dim=1, keepdim=True)
-                if self.config.use_noisy:
-                    next_q_values = target_out.gather(1, best_actions).reshape(-1)
+                if random.random() >= self.epsilon:
+                    was_training = self.dqn.training
+                    self.dqn.eval()
+                    with torch.no_grad():
+                        q_values = self.dqn(state_tensor)
+                    if was_training:
+                        self.dqn.train()
+                    return torch.argmax(q_values).item()
                 else:
-                    next_q_values = target_out.gather(1, best_actions).squeeze(-1)
+                    return random.randint(0, self.config.output_size - 1)
+
+    def OLD_select_action(self, state: np.ndarray) -> int:
+        state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+
+        if self.config.use_noisy:
+            if self.config.mode != "exploitation":
+                self.dqn.reset_noise()  # <--- bruit à chaque step
+            with torch.no_grad():
+                q_values = self.dqn(state_tensor)
+                return torch.argmax(q_values).item()
+        else:
+            # Version epsilon-greedy classique
+            if self.config.mode == "exploitation" or self.epsilon == 0:
+                with torch.no_grad():
+                    q_values = self.dqn(state_tensor)
+                    return torch.argmax(q_values).item()
             else:
-                target_out = self.target_dqn(next_state_batch)
-                next_q_values = target_out.max(dim=1)[0]
+                if random.random() >= self.epsilon:
+                    with torch.no_grad():
+                        q_values = self.dqn(state_tensor)
+                        return torch.argmax(q_values).item()
+                else:
+                    return random.randint(0, self.config.output_size - 1)
 
-            not_done = 1.0 - done_batch
-            target_q_values = (
-                reward_batch + self.config.gamma * not_done * next_q_values
+    def update_epsilon(self):
+        """Met à jour epsilon (ou ne fait rien si NoisyNet est activé)."""
+        if self.config.use_noisy:
+            # NoisyNet gère l'exploration, pas besoin d'epsilon
+            return
+        if self.config.epsilon_linear > 0:
+            self.epsilon = max(
+                self.config.epsilon_end,
+                self.epsilon - self.config.epsilon_linear
             )
-
-        # --- Loss ---
-        #OLD diff = curr_q_values - target_q_values
-        #OLD loss = (weights * diff.pow(2)).mean()
-        loss = self.criterion(curr_q_values, target_q_values)
-        loss = (weights * loss).mean()
-
-        # --- Backward ---
-        td_errors = diff.abs().detach()
-        self.replay_buffer.update_priorities(indices, td_errors)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        self.training_steps += 1
-        if self.training_steps % self.config.target_update_freq == 0:
-            self.copy_weights(self.dqn, self.target_dqn)
+        else:
+            self.epsilon = max(
+                self.config.epsilon_end,
+                self.epsilon * self.config.epsilon_decay 
+            )
 
     def train_step(self) -> Optional[float]:
-        if (
-            self.config.mode.lower() == "exploitation"
-            or len(self.replay_buffer) < self.config.batch_size
-        ):
+        # Évaluation périodique Rainbow
+        if self.config.rainbow_eval > 0:
+            # Démarrage de l'évaluation
+            if (self.training_steps+1) % self.config.rainbow_eval == 0 and self.eval_steps == 0:
+                self.config.mode = "exploitation"
+                self.set_mode(self.config.mode)
+                self.eval_steps = 1
+
+            # Pendant l'évaluation
+            if self.eval_steps > 0:
+                self.eval_steps += 1
+                if self.eval_steps >= self.config.rainbow_eval_pourcent/100*self.config.rainbow_eval:
+                    self.config.mode = "exploration"
+                    self.set_mode(self.config.mode)
+                    self.eval_steps = 0
+
+        # Ne pas entraîner en mode exploitation ou si buffer insuffisant
+        if self.config.mode == "exploitation" or len(self.replay_buffer) < max(self.config.batch_size,self.config.min_history_size):
             return None
+        
+        # 1) Sample (PER ou uniforme)
+        state_batch, action_batch, reward_batch, next_state_batch, done_batch, indices, is_weights = \
+                self.replay_buffer.sample(self.config.batch_size)
 
-        (
-            state_batch,
-            action_batch,
-            reward_batch,
-            next_state_batch,
-            done_batch,
-            indices,
-            weights,
-        ) = self.replay_buffer.sample(self.config.batch_size)
-
-        # Format des états selon le modèle
+        # 2) Reshape pour MLP vs CNN
         if self.config.model_type.lower() == "mlp":
-            state_batch = state_batch.view(self.config.batch_size, -1)
+            state_batch      = state_batch.view(self.config.batch_size, -1)
             next_state_batch = next_state_batch.view(self.config.batch_size, -1)
-        elif self.config.model_type.lower() == "cnn":
-            state_batch = state_batch.view(
-                self.config.batch_size, *self.config.input_size
-            )
-            next_state_batch = next_state_batch.view(
-                self.config.batch_size, *self.config.input_size
-            )
+        else:  # cnn
+            state_batch      = state_batch.view(self.config.batch_size, *self.config.input_size)
+            next_state_batch = next_state_batch.view(self.config.batch_size, *self.config.input_size)
 
-        action_batch = action_batch.unsqueeze(-1)
+        action_batch = action_batch.unsqueeze(-1)  # (batch, 1)
 
-        # --- Forward des Q-values actuelles ---
+        # 3) NoisyNet → reset noise si actif
         if self.config.use_noisy:
             self.dqn.reset_noise()
             self.target_dqn.reset_noise()
 
-        q_values = self.dqn(state_batch)
-        curr_q_values = (
-            q_values.gather(1, action_batch).reshape(-1)
-            if self.config.use_noisy
-            else q_values.gather(1, action_batch).squeeze(-1)
-        )
-
-        # --- Target Q-values ---
+        # 4) Q-values courantes 
+        q_values      = self.dqn(state_batch)                     # (batch, output_size)
+        curr_q_values = q_values.gather(1, action_batch).view(-1) # (batch,) 
+        
+        # 5) Q-values cibles (Double DQN si activé) et n_step implémentation
         with torch.no_grad():
             if self.config.double_dqn:
-                dqn_out = self.dqn(next_state_batch)
-                target_out = self.target_dqn(next_state_batch)
-                best_actions = dqn_out.argmax(dim=1, keepdim=True)
-                next_q_values = (
-                    target_out.gather(1, best_actions).reshape(-1)
-                    if self.config.use_noisy
-                    else target_out.gather(1, best_actions).squeeze(-1)
-                )
+                best_next = self.dqn(next_state_batch).argmax(dim=1, keepdim=True)
+                next_q_vals = self.target_dqn(next_state_batch).gather(1, best_next).view(-1)
             else:
-                target_out = self.target_dqn(next_state_batch)
-                next_q_values = target_out.max(dim=1)[0]
-
+                next_q_vals = self.target_dqn(next_state_batch).max(dim=1)[0]
             not_done = 1.0 - done_batch
-            target_q_values = (
-                reward_batch + self.config.gamma * not_done * next_q_values
-            )
+            if self.config.nstep:
+                gamma_n = self.config.gamma ** self.config.nstep_n
+                target_q = reward_batch + gamma_n * not_done * next_q_vals
+            else:
+                target_q = reward_batch + self.config.gamma * not_done * next_q_vals
 
-        # --- Loss ---
-        loss = self.criterion(curr_q_values, target_q_values)
-        loss = (weights * loss).mean()
-        td_errors = (curr_q_values - target_q_values).abs().detach()
 
-        self.replay_buffer.update_priorities(indices, td_errors)
+        # 6) Loss Huber par échantillon 
+        loss_per_sample = F.smooth_l1_loss(curr_q_values, target_q, reduction="none")
 
+        if self.config.prioritized_replay:
+            # on applique directement les IS‑weights
+            loss = (is_weights * loss_per_sample).mean()
+            # mise à jour des priorités
+            td_errors = (curr_q_values - target_q).abs().detach()
+            self.replay_buffer.update_priorities(indices, td_errors)
+        else:
+            loss = loss_per_sample.mean()
+
+        # 7) Rétropropagation et optimisation
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.dqn.parameters(), 10.0)  # 🛡️ Clipping ici
-        self.optimizer.step()
+        # on peut clipper pour la stabilité   
+        torch.nn.utils.clip_grad_norm_(self.dqn.parameters(), max_norm=10)   
+        self.optimizer.step() 
 
+        # 8) Mise à jour du réseau cible
         self.training_steps += 1
         if self.training_steps % self.config.target_update_freq == 0:
             self.copy_weights(self.dqn, self.target_dqn)
-        # --- 🧠 SANITY CHECK: valeurs extrêmes ---
-        if self.training_steps % 10000 == 0:  # toutes les 10000 itérations
-            q_max = q_values.max().item()
-            q_min = q_values.min().item()
-            q_mean = q_values.mean().item()
-            td_mean = td_errors.mean().item()
-            td_max = td_errors.max().item()
 
-            print(
-                f"{Fore.GREEN}[Sanity]{Style.RESET_ALL} Step {self.training_steps:,} | Q=[{q_min:.2f}, {q_max:.2f}], Mean={q_mean:.2f} | TD err={td_mean:.2f}, Max={td_max:.2f}"
-            )
+        # 9) Décroissance d’epsilon si on n'est pas en NoisyNet
+        self.update_epsilon()
+        
+        
+        # ───────── Critère de sanity logging ─────────
+        # On vérifie que la loss est bien un nombre fini
+        if not torch.isfinite(loss):
+            print(f"⚠️ [train_step] Step {self.training_steps}: loss non finie ! ({loss})")
+        elif self.training_steps%5000==0:
+            print(f"✅ [train_step] Step {self.training_steps}: loss OK = {loss.item():.4f}")
 
-            # 🚨 Alerte si Q-value explose
-            if abs(q_max) > 1000 or abs(q_min) > 1000:
-                print(
-                    f"⚠️ {Fore.RED}ALERT:{Style.RESET_ALL} Q-values exploding! Q range: [{q_min:.1f}, {q_max:.1f}]"
-                )
-
-            # 🚨 Alertes supplémentaires de dérive
-            if q_mean > 80:
-                print(f"⚠️ {Fore.RED}ALERT:{Style.RESET_ALL} Q_mean dérive haut >80 → {q_mean:.2f}")
-            if q_min < -200:
-                print(f"⚠️ {Fore.RED}ALERT:{Style.RESET_ALL} Q_min très bas <200 → {q_min:.2f}")
-            if td_max > 100:
-                print(f"⚠️ {Fore.RED}ALERT:{Style.RESET_ALL} TD-error MAX anormal >100 → {td_max:.2f}")
-
-
-        return loss.item()  # utile pour logger la loss
-
+        return loss.item()
     def save_model(self, path: str) -> None:
         """Sauvegarde les poids du modèle dans un fichier"""
         torch.save(self.dqn.state_dict(), path)
@@ -846,20 +824,44 @@ class DQNTrainer:
     def load_buffer(self, filename="buffer.of.states"):
         if not os.path.exists(filename):
             print("🟡 Aucun buffer sauvegardé trouvé.")
-            return
+            return -1
         try:
             loaded = torch.load(filename, map_location=self.config.device)
             current = self.replay_buffer
+
+            def print_progress_bar(current_index, total, bar_length=30):
+                fraction = current_index / total
+                filled_length = int(bar_length * fraction)
+                bar = '█' * filled_length + '-' * (bar_length - filled_length)
+                percent = int(fraction * 100)
+                sys.stdout.write(f'\r🔄 Chargement du buffer : |{bar}| {percent}% ({current_index}/{total})')
+                sys.stdout.flush()
+
             if len(loaded) <= current.capacity:
-                print(f"🟢 Chargement du buffer ({len(loaded)}/{current.capacity})")
-                current.__dict__.update(loaded.__dict__)
+                print(f"🟢 Démarrage du chargement du buffer ({len(loaded)}/{current.capacity})")
+                last_percent = -1
+                for i in range(len(loaded)):
+                    current.push(
+                        loaded.states[i],
+                        int(loaded.actions[i].item()),
+                        float(loaded.rewards[i].item()),
+                        loaded.next_states[i],
+                        bool(loaded.dones[i].item()),
+                    )
+                    percent = int((i + 1) * 100 / len(loaded))
+                    if percent != last_percent:
+                        print_progress_bar(i + 1, len(loaded))
+                        last_percent = percent
+                print("\n✅ Chargement terminé !")
             else:
                 print(f"🟠 Buffer trop gros ({len(loaded)} > {current.capacity})")
+                last_percent = -1
+                # Même logique que ci-dessus :
                 if hasattr(loaded, "priorities") and loaded.prioritized:
                     top = torch.topk(
                         loaded.priorities[: len(loaded)], current.capacity
                     ).indices
-                    for i in top:
+                    for n, i in enumerate(top):
                         current.push(
                             loaded.states[i],
                             int(loaded.actions[i].item()),
@@ -867,6 +869,10 @@ class DQNTrainer:
                             loaded.next_states[i],
                             bool(loaded.dones[i].item()),
                         )
+                        percent = int((n + 1) * 100 / current.capacity)
+                        if percent != last_percent:
+                            print_progress_bar(n + 1, current.capacity)
+                            last_percent = percent
                 else:
                     for i in range(current.capacity):
                         current.push(
@@ -876,6 +882,49 @@ class DQNTrainer:
                             loaded.next_states[i],
                             bool(loaded.dones[i].item()),
                         )
+                        percent = int((i + 1) * 100 / current.capacity)
+                        if percent != last_percent:
+                            print_progress_bar(i + 1, current.capacity)
+                            last_percent = percent
                 print("✅ Buffer rechargé avec adaptation à la capacité actuelle.")
+            return 0
         except Exception as e:
             print(f"❌ Erreur de chargement du buffer : {e}")
+            return -1
+
+    def reset_all_noisy_sigma(self, sigma0=0.5):
+        """
+        Reset les sigma_weight et sigma_bias des NoisyLinear comme dans l'ancien invaders.py.
+        Gère le cas dueling et non-dueling, MLP/CNN.
+        """
+        for name, module in self.dqn.named_modules():
+            if isinstance(module, NoisyLinear):
+                reset = False
+                # MLP
+                if self.config.model_type.lower() == 'mlp':
+                    if 'mlp_layers.0' in name:
+                        N = module.in_features
+                        reset = True
+                    elif name.endswith('output_layer'):
+                        N = module.out_features
+                        reset = True
+                    elif name.endswith('value_head') or name.endswith('advantage_head'):
+                        N = module.out_features
+                        reset = True
+                # CNN
+                elif self.config.model_type.lower() == 'cnn':
+                    if name.endswith('fc1'):
+                        N = module.in_features #(on va considérer les neurone de la couche hidden car sinon sigma_fc1 trop petit )
+                        reset = True
+                    elif name.endswith('output_layer'):
+                        N = module.out_features
+                        reset = True
+                    elif name.endswith('value_head') or name.endswith('advantage_head'):
+                        N = module.out_features
+                        reset = True
+                if reset:
+                    init_val = sigma0 / math.sqrt(N)
+                    with torch.no_grad():
+                        module.sigma_weight.fill_(init_val)
+                        module.sigma_bias.fill_(init_val)
+                    print(f"🔁 Reset sigma de {name} à {init_val:.3f}")

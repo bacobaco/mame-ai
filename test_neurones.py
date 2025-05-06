@@ -1,127 +1,92 @@
 import torch
 import matplotlib.pyplot as plt
+from AI_Mame import TrainingConfig, DQNTrainer, NoisyLinear
 import numpy as np
-from collections import deque
-from AI_Mame import TrainingConfig, DQNTrainer, DQNModel
-from invaders import StateExtractor
-import matplotlib
-matplotlib.use("TkAgg")
 
-# --- Configuration du modèle (identique à ton entraînement)
 config = TrainingConfig(
-    state_history_size=2,
-    input_size=(2,96,88),
+    state_history_size=3,
+    input_size=13,
     output_size=6,
-    hidden_layers=1,
-    hidden_size=512,
-    learning_rate=0.00025,
-    gamma=0.99,
-    use_noisy=True,
+    hidden_layers=2,
+    hidden_size=128,
+    learning_rate=0.001,
+    gamma=0.9999,
     epsilon_start=1.0,
     epsilon_end=0.1,
-    epsilon_linear=0,
+    epsilon_linear=(1-0.1) / 1_000_000,
     epsilon_decay=(0.1 / 1.0) ** (1 / 1_000_000),
     epsilon_add=0.0005,
-    buffer_capacity=20_000,
-    batch_size=32,
-    device="cuda" if torch.cuda.is_available() else "cpu",
+    use_noisy=True,
+    buffer_capacity=500000,
+    batch_size=64,
     double_dqn=True,
-    prioritized_replay=True,
-    model_type="cnn",
+    dueling=True,
+    prioritized_replay=False,
+    model_type="mlp",  # ou "cnn"
     cnn_type="deepmind",
-    state_extractor=StateExtractor("cnn", True, False, None, True,[False]*11),
+    state_extractor=None,
+    device="cuda" if torch.cuda.is_available() else "cpu",
     mode="exploration"
 )
 
-# --- Initialisation du modèle + buffer
 trainer = DQNTrainer(config)
-trainer.load_model("invaders.pth")
-trainer.load_buffer("invaders.buffer")
+trainer.load_model("invaders_mlp_double=True_N=3_i=13_hl=2,128_batch=1000000,32_l=6.25e-05_g=0.99[NoisyNet]_nb=16426_ms=618_hs=1240.pth")
+model = trainer.dqn.eval()
 
-# --- Extraction d'un vrai batch depuis le buffer
-sample_size = min(128, len(trainer.replay_buffer))
-states, *_ = trainer.replay_buffer.sample(sample_size)
-input_tensor = states.view(sample_size, *config.input_size).to(config.device)
+# Dummy batch
+if config.model_type == "mlp":
+    input_tensor = torch.randn(128, config.input_size * config.state_history_size).to(config.device)
+else:
+    input_tensor = torch.randn(128, *config.input_size).to(config.device)
 
-# --- Hook d'observation des activations + stats poids fc1
-model = trainer.dqn
-model_layers = list(model.encoder) + [model.fc1]
-if hasattr(model, 'bn_fc1'):
-    model_layers.append(model.bn_fc1)
-if hasattr(model, 'relu_fc1'):
-    model_layers.append(model.relu_fc1)
-model_layers.append(model.fc2)
-
-for i, layer in enumerate(model_layers):
-    print(f"Layer {i}: {layer}")
-
-# Affichage stats poids fc1
-print("\n📊 Poids fc1:")
-
-if hasattr(model, "fc1"):
-    print("📊 Couche fc1:")
-    if hasattr(model.fc1, "mu_weight"):
-        print(" - Moyenne mu_weight:", model.fc1.mu_weight.mean().item())
-        print(" - Écart-type sigma_weight:", model.fc1.sigma_weight.std().item())
-        try:
-            poids_bruites = model.fc1.mu_weight + model.fc1.sigma_weight * model.fc1.epsilon_weight
-            print(" - Moyenne poids bruités:", poids_bruites.mean().item())
-        except AttributeError:
-            print(" - ⚠️ Bruit non échantillonné : appelle forward() d'abord pour générer epsilon.")
-    elif hasattr(model.fc1, "weight"):
-        print(" - Moyenne poids:", model.fc1.weight.mean().item())
-    else:
-        print(" - ⚠️ Aucun attribut reconnu dans fc1.")
-
-if hasattr(model, "fc2"):
-    print("📊 Couche fc2:")
-    if hasattr(model.fc2, "mu_weight"):
-        print(" - Moyenne mu_weight:", model.fc2.mu_weight.mean().item())
-        print(" - Écart-type sigma_weight:", model.fc2.sigma_weight.std().item())
-        try:
-            poids_bruites = model.fc2.mu_weight + model.fc2.sigma_weight * model.fc2.epsilon_weight
-            print(" - Moyenne poids bruités:", poids_bruites.mean().item())
-        except AttributeError:
-            print(" - ⚠️ Bruit non échantillonné : appelle forward() d'abord pour générer epsilon.")
-    elif hasattr(model.fc2, "weight"):
-        print(" - Moyenne poids:", model.fc2.weight.mean().item())
-    else:
-        print(" - ⚠️ Aucun attribut reconnu dans fc2.")
-
-activations = []
+# Hook des activations
+activations = {}
+hooks = []
 
 def hook_fn(name):
-    def hook(module, input, output):
-        activations.append((name, output.detach().cpu()))
+    def hook(_, __, output):
+        activations[name] = output.detach().cpu()
     return hook
 
-hooks = []
-hooks.append(model.fc1.register_forward_hook(hook_fn("fc1")))
-if hasattr(model, 'bn_fc1'):
-    hooks.append(model.bn_fc1.register_forward_hook(hook_fn("bn_fc1")))
-if hasattr(model, 'relu_fc1'):
-    hooks.append(model.relu_fc1.register_forward_hook(hook_fn("relu_fc1")))
-hooks.append(model.fc2.register_forward_hook(hook_fn("fc2")))
+# Enregistrement des hooks selon le type de modèle
+if config.model_type == "mlp":
+    for i, layer in enumerate(model.mlp_layers):
+        name = f"mlp_fc{i+1}"
+        hooks.append(layer.register_forward_hook(hook_fn(name)))
+elif config.model_type == "cnn":
+    if hasattr(model, "fc1"):
+        hooks.append(model.fc1.register_forward_hook(hook_fn("fc1")))
+else:
+    raise ValueError("Type de modèle non pris en charge")
 
-# --- Forward pass
+# Forward pass
 with torch.no_grad():
     model(input_tensor)
 
-# --- Analyse et visualisation
-for name, act in activations:
+# Analyse des activations
+for name, act in activations.items():
     morts = (act == 0).all(dim=0).sum().item()
     total = act.shape[1]
-    pourcentage_morts = 100 * morts / total
-    moyenne = act.mean().item()
-    stddev = act.std().item()
+    avg = act.mean().item()
+    std = act.std().item()
     sparsity = (act < 1e-5).float().mean().item() * 100
 
-    print(f"\n🧠 {name}")
-    print(f" - Neurones morts : {morts}/{total} ({pourcentage_morts:.2f}%)")
-    print(f" - Moyenne activation : {moyenne:.4f}")
-    print(f" - Écart-type : {stddev:.4f}")
-    print(f" - Sparsité (valeurs < 1e-5) : {sparsity:.1f}%")
+    print(f"\n🧠 Activations de {name}")
+    print(f" - Neurones morts : {morts}/{total} ({100 * morts / total:.2f}%)")
+    print(f" - Moyenne : {avg:.4f} | Écart-type : {std:.4f}")
+    print(f" - Sparsité (<1e-5) : {sparsity:.1f}%")
 
+    if morts / total > 0.5:
+        print(f" ⚠️ Plus de 50% des neurones sont morts dans {name}")
+    elif morts == 0:
+        print(f" ✅ Aucun neurone mort")
+
+    if sparsity > 80:
+        print(f" 🔸 Sparsité très forte : activations quasi nulles")
+    elif sparsity < 10:
+        print(f" 🔹 Faible sparsité : couche très active")
+
+    # Histogramme
     plt.figure(figsize=(6, 3))
     plt.hist(act.flatten().numpy(), bins=50, color='steelblue')
     plt.title(f"Histogramme des activations - {name}")
@@ -132,6 +97,6 @@ for name, act in activations:
 plt.tight_layout()
 plt.show()
 
-# Nettoyage
+# Nettoyage des hooks
 for h in hooks:
     h.remove()
