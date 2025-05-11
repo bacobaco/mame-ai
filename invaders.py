@@ -22,7 +22,7 @@ import zlib
 
 # Importer les classes de ai_mame.py
 from AI_Mame import TrainingConfig, DQNTrainer, GraphWebServer
-
+from dreamerv2 import DreamerTrainer  # ajouté pour modèle Dreamer
 import threading
 
 web_server = GraphWebServer(
@@ -78,7 +78,7 @@ rolShotXr = "203E"  # Abscisse du tir de l'alien type "rol"
 squShotYr = "205D"  # Ordonnée du tir de l'alien type "squ" (ex. Squid)
 squShotXr = "205E"  # Abscisse du tir de l'alien type "squ"
 pluShotYr = "204D"  # Ordonnée du tir de l'alien type "plu"
-pluSHotXr = "204E"  # Abscisse du tir de l'alien type "plu"
+pluShotXr = "204E"  # Abscisse du tir de l'alien type "plu"
 playerAlienDead = "2100"  # Flag indiquant la mort du joueur ou d'un alien
 saucerXr = "208A"  # Coordonnées X de la soucoupe (de $29=41 à $E0=224)
 saucerActive = "2084"  # Etat d'activation de la soucoupe
@@ -94,22 +94,19 @@ playerAlive = "2015"  # Player is alive (FF=alive). Toggles between 0 and 1 for 
 player1Alive = "20E7"  # 1 if player is alive, 0 if dead (after last man)
 playerOK = "2068"  # 	1 means OK, 0 means blowing up
 
-def toggle_debug_lua(debug_lua):
-    if debug_lua:
-        comm.communicate(["debug on"])
-        print("Debug mode activé (debug=1)")
-    else:
+def toggle_debug_lua(debug_lua_current_state):
+    if debug_lua_current_state: # Si True, on veut désactiver
         comm.communicate(["debug off"])
-        print("Debug mode désactivé (debug=0)")
-    return not debug_lua     
-
+        print("Debug LUA mode désactivé")
+        return False
+    else: # Si False, on veut activer
+        comm.communicate(["debug on"])
+        print("Debug LUA mode activé")
+        return True   
 actions = {
-    0: ("left", False),
-    1: ("left", True),
-    2: ("rght", False),
-    3: ("rght", True),
-    4: ("stop", False),
-    5: ("stop", True),
+    0: ("left", False), 1: ("left", True),
+    2: ("rght", False), 3: ("rght", True),
+    4: ("stop", False), 5: ("stop", True),
 }
 def executer_action(action):
     direction, tirer = actions[action]
@@ -120,16 +117,92 @@ def executer_action(action):
     ])
 
 def get_score():
-    response = comm.communicate(
-        [
-            f"read_memory {P1ScorL}",
-            f"read_memory {P1ScorM}",
-        ]
-    )
+    response = comm.communicate([f"read_memory {P1ScorL}", f"read_memory {P1ScorM}"])
+    if not response or len(response) < 2: return 0 # Gestion d'erreur
     P1ScorL_v, P1ScorM_v = list(map(int, response))
     return (P1ScorL_v >> 4) * 10 + (P1ScorM_v & 0x0F) * 100 + ((P1ScorM_v) >> 4) * 1000
 
-def get_state(flag_coord_aliens=True, flag_boucliers=False, mult_reward_state=0.0,colonnes_deja_detruites=[False]*11):
+def get_state(flag_coord_aliens=True, flag_boucliers=False, mult_reward_state=0.0, colonnes_deja_detruites_input=None): # Renommé pour éviter conflit
+    if colonnes_deja_detruites_input is None:
+        colonnes_deja_detruites_input = [False] * 11 # Initialisation par défaut si non fourni
+
+    messages = [
+        f"read_memory {saucerXr}", f"read_memory {rolShotYr}", f"read_memory {rolShotXr}",
+        f"read_memory {squShotYr}", f"read_memory {squShotXr}", f"read_memory {pluShotYr}",
+        f"read_memory {pluShotXr}", f"read_memory {numAliens}", f"read_memory {playerXr}",
+        f"read_memory {obj1CoorXr}", f"read_memory {obj1CoorYr}", f"read_memory {refAlienYr}",
+        f"read_memory {refAlienXr}",
+    ]
+    if flag_coord_aliens: messages.append("read_memory_range 2100(55)") # 55 octets à partir de 2100
+
+    response = comm.communicate(messages)
+    if not response or len(response) < 13: return np.zeros(11), 0.0 # Gestion d'erreur, retourne un état par défaut
+
+    values = list(map(int, response[:13]))
+    flags_normalized = [
+        (values[0] - 41) / (224 - 41) if (224 - 41) != 0 else 0.0, # saucerXr
+        values[1] / 223.0, values[2] / 223.0, values[3] / 223.0, values[4] / 223.0,
+        values[5] / 223.0, values[6] / 223.0, values[7] / 55.0 if values[7] != 0 else 0.0, # numAliens
+        values[8] / 223.0, values[9] / 223.0, values[10] / 223.0,
+    ]
+    refAlienYr_val = values[11]
+    refAlienXr_val = values[12]
+    penalty_descente = 0.0
+    rewards_colonne_detruite_total = 0.0 # Renommé pour éviter conflit avec variable locale
+
+    if flag_coord_aliens:
+        if len(response) < 14: return np.array(flags_normalized), 0.0 # Gestion d'erreur
+        alien_flags_str = response[13]
+        try:
+            alien_flags = list(map(int, alien_flags_str.split(",")))
+            if len(alien_flags) != 55: # 5 lignes * 11 colonnes
+                print(f"Warning: Expected 55 alien flags, got {len(alien_flags)}. Using zeros.")
+                alien_flags = [0] * 55
+        except ValueError:
+            print(f"Warning: Could not parse alien flags: {alien_flags_str}. Using zeros.")
+            alien_flags = [0] * 55
+
+
+        nb_aliens_par_colonne = []
+        for col_idx in range(11): # Renommé col en col_idx
+            count = sum(alien_flags[row * 11 + col_idx] for row in range(5))
+            nb_aliens_par_colonne.append(count / 5.0)
+            if count == 0 and not colonnes_deja_detruites_input[col_idx]:
+                rewards_colonne_detruite_total += 1000.0
+                colonnes_deja_detruites_input[col_idx] = True
+
+        positions = [(col_idx, row) for row in range(5) for col_idx in range(11) if alien_flags[row * 11 + col_idx] == 1]
+        if positions:
+            xs, ys = zip(*positions)
+            mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+            min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
+            max_y_pixel = refAlienYr_val + max_y * 16
+        else:
+            mean_x = mean_y = min_x = max_x = min_y = max_y = max_y_pixel = 0
+
+        state_vector_list = ( # Renommé en state_vector_list pour éviter confusion
+            flags_normalized +
+            [mean_x / 10.0, mean_y / 4.0, min_x / 10.0, max_x / 10.0, min_y / 4.0, max_y / 4.0] +
+            nb_aliens_par_colonne +
+            [refAlienXr_val / 255.0, refAlienYr_val / 255.0]
+        )
+        penalty_descente = ((max_y_pixel - 184) / 10 + rewards_colonne_detruite_total) * mult_reward_state
+    else:
+        penalty_descente = (refAlienYr_val - 120) * mult_reward_state
+        state_vector_list = flags_normalized # + [refAlienXr_val / 255.0, refAlienYr_val / 255.0] # Commenté car non utilisé si flag_aliens=False
+
+    state_vector_np = np.array(state_vector_list, dtype=np.float32) # Renommé
+    state_vector_np = (state_vector_np - 0.5) * 2.0
+
+    if flag_boucliers:
+        # ... (logique des boucliers, s'assurer qu'elle retourne un np.array)
+        # Pour l'instant, je vais simuler pour éviter des erreurs si non implémenté complètement
+        boucliers_np = np.zeros(4, dtype=np.float32) # Exemple
+        state_vector_np = np.concatenate((state_vector_np, boucliers_np))
+
+
+    return state_vector_np, penalty_descente
+def old_get_state(flag_coord_aliens=True, flag_boucliers=False, mult_reward_state=0.0,colonnes_deja_detruites=[False]*11):
     messages = [
         f"read_memory {saucerXr}", #prévoir plutôt p1ShipsRem (à tester avec reward_kill=0)
         f"read_memory {rolShotYr}",
@@ -137,7 +210,7 @@ def get_state(flag_coord_aliens=True, flag_boucliers=False, mult_reward_state=0.
         f"read_memory {squShotYr}",
         f"read_memory {squShotXr}",
         f"read_memory {pluShotYr}",
-        f"read_memory {pluSHotXr}",
+        f"read_memory {pluShotXr}",
         f"read_memory {numAliens}",
         f"read_memory {playerXr}",
         f"read_memory {obj1CoorXr}",
@@ -353,7 +426,7 @@ def load_frame(filename):
     print(f"Frame chargée depuis {filename}.")
     return frame
 
-def afficher_frame(frame=None, factor_div=4):
+def afficher_frame(frame=None, factor_div=1):
     if frame is None:
         frame = get_state_full_screen(factor_div)  # Obtient directement une image 2D (192, 176)
 
@@ -408,7 +481,7 @@ def create_fig(
     trainer,NB_DE_FRAMES_STEP,
     nb_parties,
     scores_moyens,
-    fenetre,
+    fenetre_lissage,
     epsilons_or_sigmas,
     high_score,flag_aliens,flag_boucliers,
     steps_cumules,
@@ -416,11 +489,11 @@ def create_fig(
     filename="Invaders_fig",
     nb_parties_pente=1000
 ):
-    print("===> Création du graphe f(épisodes)= scores_moyens")
     matplotlib.use("Agg")  # ✅ Désactive l'affichage de la fenêtre
-    fig, ax1 = plt.subplots(constrained_layout=True)
-    # Courbe epsilon (gauche)
-    ax1.set_ylabel("Sigma FC-In (bleu --)/FC-Out (orange ._.)" if trainer.config.use_noisy else "Epsilon", color="tab:blue", fontsize=7, labelpad=0,fontweight="bold", zorder=10)
+    fig, ax1 = plt.subplots(figsize=(12, 8), constrained_layout=True) # Par exemple 12x8 pouces ou même plus grand si nécessaire : figsize=(15, 10)
+    # --- Axe Sigma/Epsilon (ax1, gauche) ---
+    ax1.set_xlabel("Nombre d'épisodes", fontsize=10)
+    ax1.set_ylabel("Sigma FC-In (bleu)/FC-Out (orange)" if trainer.config.use_noisy else "Epsilon", color="tab:blue", fontsize=7, labelpad=0,fontweight="bold", zorder=10)
     ax1.yaxis.set_label_coords(0, 0.5)
     if trainer.config.use_noisy:
         ax1.plot(epsilons_or_sigmas[0], color="tab:blue", linestyle="dashed",lw=0.8)# Lignes horizontales légères FC1
@@ -616,39 +689,41 @@ def create_fig(
         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="tab:green", lw=0.5, alpha=0.6),
         zorder=15
     )
-
-
-    fig.tight_layout()
+    #fig.tight_layout()
 
     plt.title(
-        f"Invaders AI: Score moyen des {fenetre} derniers episodes sur {str(nb_parties)} - HiSc: {high_score}pts"
+        f"Invaders AI: Score moyen des {fenetre_lissage} derniers episodes sur {str(nb_parties)} - HiSc: {high_score}pts"
     )
-    plt.savefig(filename + ".png", dpi=300, bbox_inches="tight")
+    plt.savefig(filename + ".png", dpi=300)
     # plt.savefig(filename+"_"+str(nb_parties)+"_"+datetime.now().strftime("%Y%m%d%H%M")+".png", dpi=300, bbox_inches="tight")
     plt.close()  # 🔥 Évite que plt.show() l’affiche plus tard
     return pente_recent
 
-# --- Classe pickle-safe pour encapsuler l'extraction d'état ---
 class StateExtractor:
-    def __init__(self, model_type, flag_aliens, flag_boucliers, factor_div_frame,mult_reward_state,colonnes_deja_detruites):
+    def __init__(self, model_type, flag_aliens, flag_boucliers, factor_div_frame, mult_reward_state, colonnes_deja_detruites_ref): # Renommé
         self.model_type = model_type
         self.flag_aliens = flag_aliens
         self.flag_boucliers = flag_boucliers
         self.factor_div_frame = factor_div_frame
         self.mult_reward_state = mult_reward_state
-        self.colonnes_deja_detruites = colonnes_deja_detruites
+        # Conserver une référence à la liste mutable pour que les modifications soient visibles
+        self.colonnes_deja_detruites_ref = colonnes_deja_detruites_ref
 
     def __call__(self):
-        if self.model_type.lower() == "cnn":
+        if self.model_type in ("cnn", "dreamer"):
             frame = get_state_full_screen(factor_div=self.factor_div_frame)
-            assert frame.dtype == np.float32, f"frame should be float32 but is {frame.dtype}"
-            if debug>1:print(f"🧪 CNN frame stats → min={frame.min():.4f}, max={frame.max():.4f}, mean={frame.mean():.4f}")
-            return frame, 0.0
-        else:
-            return get_state(flag_coord_aliens=self.flag_aliens, flag_boucliers=self.flag_boucliers,mult_reward_state=self.mult_reward_state,colonnes_deja_detruites=self.colonnes_deja_detruites)
+            # assert frame.dtype == np.float32, f"frame should be float32 but is {frame.dtype}" # Déjà float32
+            # if debug>1:print(f"🧪 CNN frame stats → min={frame.min():.4f}, max={frame.max():.4f}, mean={frame.mean():.4f}")
+            return frame, 0.0 # Pas de reward_state pour CNN/Dreamer ici
+        else: # MLP
+            return get_state(
+                flag_coord_aliens=self.flag_aliens,
+                flag_boucliers=self.flag_boucliers,
+                mult_reward_state=self.mult_reward_state,
+                colonnes_deja_detruites_input=self.colonnes_deja_detruites_ref # Passer la référence
+            )
 def main():
     global debug
-    # ✅ Définir les flags pour éviter l'erreur si 'cnn'
     flag_aliens = False
     flag_boucliers = False
     debug = 0
@@ -658,9 +733,9 @@ def main():
     # N = state_history_size => N=2 capture la vitesse et N>=3 capture la dynamique (accélération/sens)
     N = 3
     # 🎮 Space Invaders (invaders ROM) → 60 frames/seconde
-    NB_DE_FRAMES_STEP = 5 # 4 on a 15 steps par secondes, 5 correspond à 12 steps par secondes, 6=10 steps par secondes
+    NB_DE_FRAMES_STEP = 4 # 4 on a 15 steps par secondes, 5 correspond à 12 steps par secondes, 6=10 steps par secondes
     # Création de la configuration avec TrainingConfig
-    model_type = "cnn"  # mlp ou cnn (pour les full_2d_frame)
+    model_type = "mlp"  # mlp ou cnn (pour les full_2d_frame) ou "dreamer" solution DreamerV2 lié à dreamerv2.py
     if model_type.lower() == "cnn":
         cnn_type = "deepmind"  # precise ou default, precise ou deepmind
         full_frame_2D = (192, 176) # on utilise que 192 sur 224 pts (Largeur) et 176 sur 256 pts (Hauteur)
@@ -671,7 +746,8 @@ def main():
         # 3 appels pour chaque action
         # 2 appels pour le score
         NB_DE_DEMANDES_PAR_STEP = str(1 + 2 + 3 + 2)
-    else:
+        TRAIN_EVERY_N_GLOBAL_STEPS = 2
+    elif model_type.lower() == "mlp":
         factor_div_frame, cnn_type= None, None # valeurs non utilisées car pas utilisées pour MLP
         flag_aliens = False # comporte 110 coordonnées => pour 6 entrées coordonnées (mean/min/max)
         # Flag_boucliers (alpha)  4 appels à partir de 0x2460 => 4 inputs en + (somme des octets de chaque bouclier)
@@ -680,25 +756,35 @@ def main():
         input_size = 11 + (6 + 11) * flag_aliens + 4 * flag_boucliers  #+ 2
         # 11 infos + 2 refAliens + aliens flags + 4 boucliers + 3 actions + 2 score + 2 fin de partie et joueur
         NB_DE_DEMANDES_PAR_STEP = str((11 + 2) + flag_aliens + 4 * flag_boucliers + 3 + 2 + 2)
-
+        TRAIN_EVERY_N_GLOBAL_STEPS = 1
+    elif model_type.lower() == "dreamer":
+        factor_div_frame = 2
+        cnn_type = None
+        full_frame_2D = (192//factor_div_frame, 176//factor_div_frame) # on utilise que 192 sur 224 pts (Largeur) et 176 sur 256 pts (Hauteur) => (96, 176)
+        input_size = (N,) + full_frame_2D
+        NB_DE_DEMANDES_PAR_STEP = str(1 + 2 + 3 + 2)
+        TRAIN_EVERY_N_GLOBAL_STEPS = 10
+    else:
+        raise ValueError(f"Modèle {model_type} non pris en charge.")
     # === Rewards ===
     reward_clipping_deepmind=True  ## ATTENTION !! réduit les rewards à 3 valeurs [-1,0,1], si on utilise que le score (CNN/DeepMind) alors [0,1]
     reward_aliens_mult = 1 # Multiplicateur de la récompense si un alien est tue
-    reward_kill = -0*reward_aliens_mult # Perte de points si le joueur meurt (pas pour la dernier vie)
+    reward_kill = -00*reward_aliens_mult # Perte de points si le joueur meurt (pas pour la dernier vie)
     reward_alive = 0.000*NB_DE_FRAMES_STEP # Ajout d'une récompense à chaque step si le joueur est vivant
-    reward_mult_step = -0.00000*NB_DE_FRAMES_STEP # Multiplicateur de la récompense par step (pour ne pas être attentiste)
+    reward_mult_step = -0.0000*NB_DE_FRAMES_STEP # Multiplicateur de la récompense par step (pour ne pas être attentiste)
     mult_reward_state = 0.00 # multiplicateur d'un reward spécifique pour get_state (cf code): aliens approchant du joueur,...
     reward_end_of_game = -0 # en fin de partie
     colonnes_deja_detruites = [False] * 11 # Utiliser (mlp) pour savoir si on colonne d'aliens vient juste être détruite (True=déjà détruite)
     # === Exploration ===
-    use_noisy = True
-    rainbow_eval = 200_000
+    use_noisy = True if model_type.lower() != "dreamer" else False 
+    rainbow_eval = 250_000 # Nombre de steps avant de commencer les évaluations (250 000 pour Rainbow)
+    rainbow_eval_pourcent = 3/TRAIN_EVERY_N_GLOBAL_STEPS # Pourcentage de rainbow_eval  pour évaluer le modèle
     epsilon_start = 1 if not use_noisy else 0.001
     epsilon_end = 0.0
-    target_steps = 1000_000
-    epsilon_linear =  (epsilon_start-epsilon_end)/target_steps
-    epsilon_decay = (epsilon_end / epsilon_start) ** (1 / target_steps) if epsilon_linear==0 else 0
-    epsilon_add = ((epsilon_start-epsilon_end)/target_steps)*NB_DE_FRAMES_STEP*100 if not use_noisy else 0.0 # ajoute à epsilon si pente<0 et mean_old_score>mean_new_score
+    target_steps_for_epsilon_end = 1000_000
+    epsilon_linear =  (epsilon_start-epsilon_end)/target_steps_for_epsilon_end
+    epsilon_decay = (epsilon_end / epsilon_start) ** (1 / target_steps_for_epsilon_end) if epsilon_linear==0 else 0
+    epsilon_add = ((epsilon_start-epsilon_end)/target_steps_for_epsilon_end)*NB_DE_FRAMES_STEP*100 if not use_noisy else 0.0 # ajoute à epsilon si pente<0 et mean_old_score>mean_new_score
 
     config = TrainingConfig(
         state_history_size=N,  # Nombre de frames consécutives à conserver dans l'historique
@@ -707,9 +793,9 @@ def main():
         # Taille totale de l'entrée pour le MLP
         # (pour Invaders, typiquement entre 100 et 300 ;
         # pour un CNN, fournir un tuple (channels, height, width))
-        hidden_layers=1,  # Nombre de couches cachées dans le réseau
+        hidden_layers=2,  # Nombre de couches cachées dans le réseau
         # (recommandé : 1 à 3, ici 2 est courant)
-        hidden_size=512,  # Nombre de neurones par couche cachée (512x1 pour Atari en cnn/rainbow, 128x2 ou 256x2 proposé par chatGPT)
+        hidden_size=256,  # Nombre de neurones par couche cachée (512x1 pour Atari en cnn/rainbow, 128x2 ou 256x2 proposé par chatGPT)
         # (recommandé : 64 à 512, 192 est souvent un bon compromis)
         output_size=6,  # Nombre de sorties (actions possibles)
         # (fixe pour Invaders : 6 actions)
@@ -718,19 +804,20 @@ def main():
         gamma=0.99,  # Facteur de discount pour valoriser les récompenses futures 0.99 pour deepmind
         # (recommandé : entre 0.9 et 0.9999, ici très élevé pour privilégier l'avenir)
         use_noisy=use_noisy,
-        rainbow_eval=rainbow_eval,  # Nombre d'épisodes récurrents (100 000 pour Rainbow) pour évaluer le modèle
+        rainbow_eval=rainbow_eval,  # Nombre de steps avant de commencer les evaluations (250 000 pour Rainbow)
+        rainbow_eval_pourcent=rainbow_eval_pourcent,  # Pourcentage de rainbow_eval_steps pour évaluer le modèle
         epsilon_start=epsilon_start,
         epsilon_end=epsilon_end,
         epsilon_linear=epsilon_linear,
         epsilon_decay=epsilon_decay,
         epsilon_add=epsilon_add,
-        buffer_capacity=100_000,  # Capacité maximale du replay buffer pour cnn 10 000 vaut 4 Go de GPU RAM !
-        # (recommandé : de 10 000 à 1 000 000, ici 100 000 est courant)
-        batch_size=32,  # Taille du lot d'échantillons pour l'entraînement
+        buffer_capacity=500_000,  # Capacité maximale du replay buffer pour cnn/dreamerv2 10 000 vaut 4 Go de GPU RAM minimum !
+        # (recommandé mlp: de 10 000 à 1 000 000, ici 100 000 est courant)
+        batch_size=64,  # Taille du lot d'échantillons pour l'entraînement
         # (recommandé : entre 32 et 256, ici 128)
-        min_history_size=2000,  # Nombre d'échantillons minimum dans le replay buffer avant de commencer l'entraînement (80k rainbow)
+        min_history_size=20000,  # Nombre d'échantillons minimum dans le replay buffer avant de commencer l'entraînement (80k rainbow)
         prioritized_replay=True,  # Activation du replay buffer prioritaire 
-        target_update_freq=2000,  #32000 pour rainbow soit 10 episodes x nbsteps/episodes (~1000) ou soit batch_size*10
+        target_update_freq=10000,  #32000 pour rainbow soit 10 episodes x nbsteps/episodes (~1000) ou soit batch_size*10
         double_dqn=True,  # Activation du Double DQN (True pour réduire l'overestimation des Q-valeurs)
         dueling=True,
         nstep= True,   # ← option nstep activable
@@ -834,12 +921,15 @@ def main():
     keyboard.on_press(on_key_press)
 
     # Instanciation de DQNTrainer
-    trainer = DQNTrainer(config)
+    if config.model_type.lower() == "dreamer": 
+        trainer = DreamerTrainer(config)
+    else:
+        trainer = DQNTrainer(config)
     print(f"Utilisation de l'appareil : {trainer.device}")
     trainer.load_model("./invaders.pth")
     _flag=trainer.load_buffer("./invaders.buffer")
-    if config.use_noisy and _flag==-1:
-        trainer.reset_all_noisy_sigma()
+    # if config.use_noisy and _flag==-1:
+    #     trainer.reset_all_noisy_sigma()
 
     # Initialisations video OBS
     record = False
@@ -858,14 +948,15 @@ def main():
     mean_score = mean_score_old = last_score = high_score = 0
 
     # Déterminer la taille correcte de la frame vide en fonction du modèle
-    if config.model_type.lower() == "cnn":
+    if config.model_type.lower() in ("cnn", "dreamer"):
         empty_frame = np.zeros(
             (config.input_size[1], config.input_size[2]), dtype=np.float32
-        )  # ( H, W)
+        )  # (H, W)
     else:
         empty_frame = np.zeros(
             (config.input_size,), dtype=np.float32
         )  # Format MLP (1D vecteur)
+
 
     response = comm.communicate(
         [
@@ -889,7 +980,7 @@ def main():
         f"[nb_mess_frame={NB_DE_DEMANDES_PAR_STEP}]"
         f"[nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]"
     )
-    nb_steps = 0  # Compte le nombre d'actions de step avec state effectuées mais pas forcément de train_step
+    nb_steps_total = 0  # Compte le nombre d'actions de step avec state effectuées mais pas forcément de train_step
     num_episodes = 99999
     for episode in range(num_episodes):
         trainer.config.current_episode = episode
@@ -903,24 +994,31 @@ def main():
 
         comm.communicate([f"wait_for 1"])
         comm.communicate([f"write_memory {numCoins}(1)"])
-        # Initialiser l'historique avec N copies de frames vides
-        trainer.state_history.extend(
-            [empty_frame.copy() for _ in range(config.state_history_size)]
-        )
-        assert (
-            len(trainer.state_history) == config.state_history_size
-        ), f"Erreur : state_history a une taille incorrecte {len(trainer.state_history)}, attendu {config.state_history_size}."
-        # Générer l'état initial en empilant les frames
-        if config.model_type.lower() == "cnn":
-            state = np.stack(trainer.state_history, axis=0)  # (N, H, W)
+        
+        # Vider l'historique des frames brutes (géré par DQNTrainer ou ici si Dreamer)
+        if hasattr(trainer, 'state_history') and isinstance(trainer.state_history, deque):
+             trainer.state_history.clear()
+        else: # Si DreamerTrainer n'a pas cet attribut, on le crée temporairement pour la logique ici
+             local_state_history = deque(maxlen=config.state_history_size)
+        for _ in range(config.state_history_size):
+            # `config.state_extractor()` retourne (frame_brute, reward_supplementaire_de_state)
+            current_single_frame, _ = config.state_extractor()
+            if hasattr(trainer, 'state_history') and isinstance(trainer.state_history, deque):
+                trainer.state_history.append(current_single_frame)
+            else:
+                local_state_history.append(current_single_frame)
+        # Construire la première pile d'observations (o_0)
+        if hasattr(trainer, 'state_history') and isinstance(trainer.state_history, deque):
+            initial_observation_stack = np.stack(trainer.state_history, axis=0)
         else:
-            # 🔍 Vérifier la taille des `states` avant stockage
-            state = np.concatenate(
-                trainer.state_history, axis=0
-            )  # ✅ Concatène `N` états en un vecteur unique
-            assert (
-                state.shape[0] == config.input_size * config.state_history_size
-            ), f"Erreur : state.shape={state.shape}, attendu={config.input_size}. Vérifie input_size dans TrainingConfig."
+            initial_observation_stack = np.stack(local_state_history, axis=0)
+        # `initial_observation_stack` est (N, H, W)
+
+        # ---- Initialisation spécifique à DreamerV2 ----
+        if config.model_type.lower() == "dreamer":
+            trainer.encode_state_initial(initial_observation_stack)
+            prev_action_value = 0 # Action fictive pour le premier pas du RSSM (ex: "ne rien faire")
+
 
         while NotEndOfGame == 0:
             NotEndOfGame = int(comm.communicate([f"read_memory {player1Alive}"])[0])
@@ -931,55 +1029,129 @@ def main():
         comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
         start_steps_time = time.time()  # 🔥 Début de la mesure d'un step
         nb_vies=3
+        current_loop_observation_stack = initial_observation_stack # o_t
+        # Déplacer la création de `local_state_history_for_invaders_loop` ici si nécessaire
+        # Cette deque est pour la logique de `invaders.py` pour empiler les frames individuelles
+        # reçues de `config.state_extractor()` pour former la pile `(N,H,W)`.
+        invaders_loop_frame_history = deque(maxlen=config.state_history_size)
+        for frame_in_stack in initial_observation_stack: # Pré-remplir avec les frames initiales
+            invaders_loop_frame_history.append(frame_in_stack)
         while NotEndOfGame == 1:
-            action = trainer.select_action(state)
+            # 1. Sélection d'action
+            if config.model_type.lower() == "dreamer":
+                # `current_loop_observation_stack` est o_t (N,H,W)
+                # `prev_action_value` est a_{t-1}
+                action = trainer.dreamer_step(current_loop_observation_stack, prev_action_value)
+            else: # CNN / MLP
+                # `current_loop_observation_stack` est l'état pour DQN (peut être (N,H,W) ou vecteur concaténé)
+                # La logique existante pour CNN/MLP devrait fonctionner si `current_loop_observation_stack` est bien formaté.
+                # Pour CNN, `state` est `np.stack(trainer.state_history, axis=0)`
+                # Pour MLP, `state` est `np.concatenate(trainer.state_history, axis=0)`
+                # Assurons-nous que `current_loop_observation_stack` est correct pour DQN.
+                # La logique originale était:
+                # current_state0, reward_state = config.state_extractor()
+                # trainer.state_history.append(current_state0)
+                # state_for_dqn = np.stack(trainer.state_history, axis=0) # ou concatenate pour MLP
+                # action = trainer.select_action(state_for_dqn)
+                # CE QUI EST FAIT CI-DESSOUS JUSTE AVANT L'APPEL A `select_action` DANS LA BOUCLE ORIGINALE.
+                # Donc, `current_loop_observation_stack` est bien o_t pour Dreamer.
+                # Pour DQN, nous allons reconstruire l'état comme avant.
+                
+                # Pour DQN:
+                # La logique originale de `invaders.py` pour CNN/MLP:
+                # current_single_frame_dqn, reward_state_dqn = config.state_extractor()
+                # trainer.state_history.append(current_single_frame_dqn)
+                # if config.model_type.lower() == "cnn":
+                #     state_for_dqn_action = np.stack(trainer.state_history, axis=0)
+                # else: # MLP
+                #     state_for_dqn_action = np.concatenate(trainer.state_history, axis=0)
+                # action = trainer.select_action(state_for_dqn_action)
+                # Cette logique est recréée plus bas si ce n'est pas Dreamer.
+                # Pour l'instant, `current_loop_observation_stack` est l'observation pour Dreamer.
+                # La variable `state` dans votre code original était `current_loop_observation_stack`
+                action = trainer.select_action(current_loop_observation_stack if config.model_type.lower() == "cnn" else np.concatenate(list(invaders_loop_frame_history),axis=0))
+
+            # 2. Exécuter l'action
             executer_action(action)
+            # `action` est a_t
+
+            # 3. Obtenir la nouvelle observation brute, la récompense, et 'done'
+            # `next_single_frame` est l'image brute o'_{t+1}
+            next_single_frame, reward_state_component = config.state_extractor()
             _last_score = score
             score = get_score()
-            current_state0, reward_state = config.state_extractor()
-            next_state = trainer.update_state_history(current_state0)
-            PlayerIsOK, NotEndOfGame = list(map(int,comm.communicate([f"read_memory {playerOK}", f"read_memory {player1Alive}"]),))   
+            PlayerIsOK, NotEndOfGame = list(map(int, comm.communicate([
+                f"read_memory {playerOK}",
+                f"read_memory {player1Alive}"]),
+            ))
+
+            # Calcul de la récompense r_t
             if PlayerIsOK == 1:
-                reward = reward_alive # remise à une valeur init de reward ici reward d'etre en vie
-            elif nb_vies > 1: # Possibilité de différencier derniere vie... Ici vie n°1 et  n°2
-                reward = reward_kill 
-            else: # Derniere vie, nb_vies = 1
-                reward = reward_kill+reward_end_of_game
+                reward = reward_alive
+            elif nb_vies > 1: # Le joueur est mort mais a encore des vies
+                reward = reward_kill
+            else: # Le joueur est mort et c'est la dernière vie (fin de partie)
+                reward = reward_kill + reward_end_of_game
+
             reward += (
-                ((score - _last_score) * reward_aliens_mult) + 
-                (step * reward_mult_step) +
-                (reward_state)
-                )
-            # 🎯 Clipping DeepMind
-            if reward_clipping_deepmind: 
-                reward = 1 if reward > 0 else -1 if reward < 0 else 0  # → -1, 0, +1 uniquement (DeepMind)
-            # Accumulation des récompenses
+                ((score - _last_score) * reward_aliens_mult) +
+                (step * reward_mult_step) + # step est le compteur de pas dans l'épisode
+                reward_state_component
+            )
+            if reward_clipping_deepmind:
+                reward = np.sign(reward) # Clip reward à -1, 0, 1
+
             sum_rewards += reward
-            done = PlayerIsOK == 0 # je viens de perdre une vie
-            if trainer.config.mode.lower() == "exploration":
+            done = PlayerIsOK == 0
+
+            # 4. Construire la pile d'observations suivante (o_{t+1})
+            invaders_loop_frame_history.append(next_single_frame)
+            next_observation_stack = np.stack(invaders_loop_frame_history, axis=0) # (N,H,W)
+            # `next_observation_stack` est o_{t+1}
+
+            # 5. Stocker la transition
+            if config.model_type.lower() == "dreamer":
+                # `current_loop_observation_stack` est o_t
+                # `action` est a_t
+                # `reward` est r_t
+                # `next_observation_stack` est o_{t+1}
+                # `done` est d_t
+                trainer.store_transition(current_loop_observation_stack, action, reward, next_observation_stack, False)
+            elif config.mode.lower() == "exploration": # Pour CNN/MLP
+                # La logique originale pour DQN:
+                # state_for_buffer = current_loop_observation_stack (ou sa version MLP)
+                # next_state_for_buffer = next_observation_stack (ou sa version MLP)
+                if config.model_type.lower() == "cnn":
+                    state_for_buffer_dqn = current_loop_observation_stack
+                else: # MLP
+                    # Utiliser l'état MLP tel qu'il était au moment de la sélection d'action
+                    state_for_buffer_dqn = np.concatenate(list(invaders_loop_frame_history), axis=0)
+                next_state_for_buffer_dqn = next_observation_stack if config.model_type.lower() == "cnn" else np.concatenate(list(invaders_loop_frame_history), axis=0)
+
                 if trainer.config.nstep:
-                    nstep_tr = trainer.nstep_wrapper.append(state, action, reward, done, next_state)
+                    nstep_tr = trainer.nstep_wrapper.append(state_for_buffer_dqn, action, reward, done, next_state_for_buffer_dqn)
                     if nstep_tr:
                         trainer.replay_buffer.push(*nstep_tr)
-                    if done:
-                        for tr in trainer.nstep_wrapper.flush():
-                            trainer.replay_buffer.push(*tr)
+                    if done: # S'assurer que `done` est bien d_t ici.
+                        for tr_flush in trainer.nstep_wrapper.flush():
+                            trainer.replay_buffer.push(*tr_flush)
                 else:
-                    trainer.replay_buffer.push(state, action, reward, next_state, done)
-            # else: exploitation --> ne rien push !
+                    trainer.replay_buffer.push(state_for_buffer_dqn, action, reward, next_state_for_buffer_dqn, done)
 
-            state = next_state
-            trainer.update_epsilon()
+            # 6. Mettre à jour l'état pour le prochain pas de la boucle
+            current_loop_observation_stack = next_observation_stack # o_t devient o_{t+1}
+            if config.model_type.lower() == "dreamer":
+                prev_action_value = action # a_{t-1} devient a_t
+            else: # CNN/MLP
+                trainer.update_epsilon() # Géré par DQNTrainer
+
+            # 7. Apprentissage
+            if nb_steps_total % TRAIN_EVERY_N_GLOBAL_STEPS == 0:
+                trainer.train_step()
             step += 1
-            trainer.train_step()    # ne fait rien si pas assez d'éléments dans le replay buffer ou en mode exploitation
-            if PlayerIsOK == 0:
-                comm.communicate(["wait_for 2"])        
-                while PlayerIsOK == 0 and NotEndOfGame == 1:
-                    PlayerIsOK, NotEndOfGame = list(map(int,comm.communicate([f"read_memory {playerOK}", f"read_memory {player1Alive}"]),))
-                if PlayerIsOK == 1: 
-                    nb_vies-=1
-                    comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
-                    
+            nb_steps_total +=1
+            
+            # 7.bis. Affichage de la frame ou debug ou appui de touche
             if debug >= 1:
                 elapsed_steps_time = (time.time() - start_steps_time)
                 direction, tirer = actions[action]
@@ -990,25 +1162,29 @@ def main():
                     f"reward={reward:<6.3f}score={score:<5d} sum_rewards={sum_rewards:<6.0f}"
                     f"nb_mess_step={comm.number_of_messages:<4d}nb_step={step:<5d}"
                 )
-                if debug >= 2:
-                    if config.model_type.lower() == "cnn":
-                        print(f"🧠 state.shape = {state.shape} | min={state.min():.2f}, max={state.max():.2f}, mean={state.mean():.2f}")
-                    else:
-                        print(f"state={state}")
             comm.number_of_messages = 0   
             if flag_F11_pressed:
                 debug_lua=toggle_debug_lua(debug_lua)
                 flag_F11_pressed=False
                 print(f" ==============  toggle_debug_lua({not debug_lua}) <====> F11")
             if flag_F8_pressed:
-                if config.model_type == "cnn":
-                    print("====>F8====> Affichage d'une frame")
-                    afficher_frame(current_state0)  
+                if config.model_type == "cnn" or config.model_type == "dreamer":
+                    print("====>F8====> Affichage d'une frame (la plus récente observée)")
+                    afficher_frame(next_single_frame, factor_div=factor_div_frame)
                 elif config.model_type == "mlp":
                     print("====>F8====> Affichage de l'état MLP get_state()")
                     afficher_get_state()
                 flag_F8_pressed=False
-
+            # 8. Gestion de la fin de vie du joueur et debug et appuies de touches
+            if PlayerIsOK == 0:
+                comm.communicate(["wait_for 2"])        
+                while PlayerIsOK == 0 and NotEndOfGame == 1:
+                    PlayerIsOK, NotEndOfGame = list(map(int,comm.communicate([f"read_memory {playerOK}", f"read_memory {player1Alive}"]),))
+                if PlayerIsOK == 1: 
+                    nb_vies-=1
+                    comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
+                if NotEndOfGame == 0 and config.model_type.lower() == "dreamer":
+                    trainer.store_transition(current_loop_observation_stack, action, reward, next_observation_stack, True)
 
         response = comm.communicate(["wait_for 0"])
         if record:
@@ -1040,7 +1216,7 @@ def main():
             if trainer.config.model_type.lower() == "cnn":
                 sigma_hidden1 = sigmas.get("fc1", 0.0)
             else:
-                sigma_hidden1 = sigmas.get("mlp_layers.0", 0.0)
+                sigma_hidden1 = sigmas.get("hidden_modules.0.0", 0.0)
 
             # 2️⃣ Récupère la couche de sortie (output)
             if trainer.config.dueling:
@@ -1056,27 +1232,24 @@ def main():
         else:
             list_of_epsilons_or_sigmas[0].append(trainer.epsilon)
 
-        list_of_cumulated_steps.append(nb_steps)
+        list_of_cumulated_steps.append(nb_steps_total)
         collection_of_score.append(score)
         mean_score_old = mean_score
         mean_score = round(sum(collection_of_score) / len(collection_of_score), 2)
         list_of_mean_scores.append(mean_score)
-        if score > high_score:
-            high_score = (
-                score  # Mise à jour du high score si un meilleur score est atteint
-            )
-        if mean_score_old > mean_score and not use_noisy:
-            trainer.epsilon += config.epsilon_add if trainer.epsilon < config.epsilon_start else 0.0
-        
-        if trainer.epsilon < 0.001 and trainer.config.mode == "exploration":
-            trainer.config.mode = "exploitation"
-            trainer.set_mode(trainer.config.mode)
-            print("====================================> Mode EXPLOITATION car epsilon < 0.001 <====")
+        if score > high_score: high_score = score  # Mise à jour du high score si un meilleur score est atteint
+        if not (config.model_type.lower() == "dreamer" or config.use_noisy): # Epsilon update pour DQN non-bruyant
+            if mean_score_old > mean_score:
+                 trainer.epsilon += config.epsilon_add if trainer.epsilon < config.epsilon_start else 0.0
+            if trainer.epsilon < 0.001 and trainer.config.mode == "exploration":
+                trainer.config.mode = "exploitation"
+                trainer.set_mode(trainer.config.mode)
+                print("====================================> Mode EXPLOITATION car epsilon < 0.001 <====")
 
         if mean_score == mean_score_old:
             pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
         _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        nb_steps+=step
+        #nb_steps_total+=step
         if config.use_noisy:
             sigma_vals = trainer.dqn.get_sigma_values()
             sigma_str = ", ".join([f"{name} = {val:.6f}" for name, val in sigma_vals.items()])
@@ -1084,9 +1257,14 @@ def main():
         else:
             exploration_str = f"[ε={trainer.epsilon:.4f}]"
         exploration_str = exploration_str  if config.mode != "exploitation" else "[*** Mode EXPLOITATION ***]"
+        exploration_str = exploration_str if config.model_type != "dreamer" else "[Mode DREAMER.V2]"
         print(
-            f"N°{episode+1} [{_d}][steps,all={step:4d},{str(nb_steps//1000)+'k':>5}]"
-            +f"[Buffer={trainer.replay_buffer.size/1000:.0f}k/{trainer.config.buffer_capacity/1000:.0f}k]"
+            f"N°{episode+1} [{_d}][steps_ep,all={step:4d},{str(nb_steps_total//1000)+'k':>5}]"
+            + (
+                f"[Buffer={trainer.replay_buffer.size/1000:.0f}k/{trainer.config.buffer_capacity/1000:.0f}k]"
+                if hasattr(trainer, "replay_buffer")
+                else ""
+            )
             + exploration_str
             + f"[rewards={sum_rewards:5.0f}]"
             + f"[score={score:3d}][score moyen={mean_score:3.0f}]"

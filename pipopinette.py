@@ -159,11 +159,12 @@ class JeuPipopinette:
         
         # Chargement des polices d'écriture
         pygame.font.init()
+        
         try:
-            self.police_titre = pygame.font.SysFont('Segoe UI', 40, bold=True)
-            self.police = pygame.font.SysFont('Segoe UI', 24)
-            self.police_score = pygame.font.SysFont('Segoe UI', 28, bold=True)
-            self.police_info = pygame.font.SysFont('Segoe UI', 10)
+            self.police_titre = pygame.font.SysFont('segoeuiemoji', 40, bold=True)
+            self.police = pygame.font.SysFont('segoeuiemoji', 24)
+            self.police_score = pygame.font.SysFont('segoeuiemoji', 28, bold=True)
+            self.police_info = pygame.font.SysFont('segoeuiemoji', 10)
         except:
             self.police_titre = pygame.font.SysFont(None, 36, bold=True)
             self.police = pygame.font.SysFont(None, 24)
@@ -221,11 +222,11 @@ class JeuPipopinette:
             self.difficulte_ia
         )
         
-        y_bas = self.hauteur_fenetre - 90
+        y_bas = self.hauteur_fenetre//2 +200
 
         self.bouton_recommencer = Bouton(
             self.largeur_fenetre - self.panneau_lateral_largeur + 50,
-            y_bas - 200,
+            y_bas -50,
             self.panneau_lateral_largeur - 100,
             40,
             "Nouvelle Partie",
@@ -234,7 +235,7 @@ class JeuPipopinette:
 
         self.bouton_menu = Bouton(
             self.largeur_fenetre - self.panneau_lateral_largeur + 50,
-            y_bas - 150,
+            y_bas - 100,
             self.panneau_lateral_largeur - 100,
             40,
             "Menu Principal",
@@ -292,7 +293,7 @@ class JeuPipopinette:
         
         # Scores détaillés
         y_pos = 30
-        titre_score = self.police.render("Scores", True, NOIR)
+        titre_score = self.police_titre.render("Scores", True, NOIR)
         self.fenetre.blit(titre_score, (
             panneau_rect.centerx - titre_score.get_width() // 2,
             y_pos
@@ -345,16 +346,14 @@ class JeuPipopinette:
         self.slider_difficulte.mettre_a_jour_knob()
         self.slider_difficulte.dessiner(self.fenetre)
 
-        y_pos += 70
+        y_pos=self.hauteur_fenetre
         # Information sur la règle du jeu
-        y_pos += 100
         regles_titre = self.police.render("Règles", True, NOIR)
         self.fenetre.blit(regles_titre, (
             panneau_rect.centerx - regles_titre.get_width() // 2,
-            y_pos
+            y_pos-80
         ))
         
-        y_pos += 60
         regles_texte = [
             "• Reliez les points par des lignes",
             "• Complétez des carrés pour marquer des points",
@@ -366,7 +365,7 @@ class JeuPipopinette:
             texte = self.police_info.render(ligne, True, NOIR)
             self.fenetre.blit(texte, (
                 panneau_rect.left + 30,
-                y_pos
+                y_pos-50
             ))
             y_pos += 1 * texte.get_height()
         
@@ -499,7 +498,7 @@ class JeuPipopinette:
                     pygame.draw.rect(self.fenetre, ROUGE_PALE, rect, border_radius=5)
                     
                     # Ajouter un petit "J" dans la case
-                    label = self.police.render("J", True, ROUGE)
+                    label = self.police.render("You !", True, ROUGE)
                     self.fenetre.blit(label, 
                         (x + self.taille_case // 2 - label.get_width() // 2,
                          y + self.taille_case // 2 - label.get_height() // 2))
@@ -510,7 +509,7 @@ class JeuPipopinette:
                     pygame.draw.rect(self.fenetre, BLEU_PALE, rect, border_radius=5)
                     
                     # Ajouter un petit "O" dans la case
-                    label = self.police.render("O", True, BLEU)
+                    label = self.police.render("Ordi !", True, BLEU)
                     self.fenetre.blit(label, 
                         (x + self.taille_case // 2 - label.get_width() // 2,
                          y + self.taille_case // 2 - label.get_height() // 2))
@@ -554,25 +553,25 @@ class JeuPipopinette:
                 couleur_fin = OR
                 couleur_cadre = (255, 250, 205)  # Jaune très pâle
                 # Couronne de victoire
-                victoire_icon = "👑 "
+                victoire_icon = "👑 👍"
             else:
                 couleur_fin = NOIR
                 couleur_cadre = GRIS
-                victoire_icon = ""
+                victoire_icon = "😭 "
             
             fin_surface = self.police_titre.render(victoire_icon + self.message_fin, True, couleur_fin)
             cadre_fin = pygame.Rect(
                 (self.largeur_fenetre - self.panneau_lateral_largeur) // 2 - fin_surface.get_width() // 2 - 25,
                 self.hauteur_fenetre // 2 - 30,
                 fin_surface.get_width() + 50,
-                60
+                70
             )
             
             pygame.draw.rect(self.fenetre, couleur_cadre, cadre_fin, border_radius=15)
             pygame.draw.rect(self.fenetre, OR, cadre_fin, 4, border_radius=15)
             self.fenetre.blit(fin_surface, 
                              ((self.largeur_fenetre - self.panneau_lateral_largeur) // 2 - fin_surface.get_width() // 2,
-                              self.hauteur_fenetre - 70))
+                              self.hauteur_fenetre // 2 - 20))
             
     def est_survole_h(self, i, j):
         """Vérifie si la souris survole une ligne horizontale"""
@@ -677,7 +676,7 @@ class JeuPipopinette:
             if self.score_joueur > self.score_ordi:
                 self.message_fin = f"Vous avez gagné! {self.score_joueur} - {self.score_ordi}"
             elif self.score_ordi > self.score_joueur:
-                self.message_fin = f"L'ordinateur a gagné! {self.score_ordi} - {self.score_joueur}"
+                self.message_fin = f"Vous avez perdu... {self.score_ordi} - {self.score_joueur}"
             else:
                 self.message_fin = f"Match nul! {self.score_joueur} - {self.score_ordi}"
         

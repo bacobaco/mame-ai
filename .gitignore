@@ -77,3 +77,6 @@ plugins - Raccourci.lnk
 PythonBridgeSocket_12346.lua.bak
 PythonBridgeSocket.txt
 /logs
+invaders_mlp_DDQN__Dueling_Prioritized_nstep_N=33_i=11_o=6_hl=2,256_batch=500000,32_l=0.0001_g=0.99\[NoisyNet]_nb=13125_ms=686_hs=1320.buffer
+invaders_cnn_DDQN__Dueling_Prioritized_nstep_N=33_i=(3, 96, 88)_o=6_hl=1,512_batch=100000,32_l=0.0001_g=0.99\[NoisyNet]_nb=9619_ms=347_hs=1010.buffer
+invadersDV2.buffer
