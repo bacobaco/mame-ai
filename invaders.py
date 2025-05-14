@@ -731,7 +731,7 @@ def main():
     vitesse_de_jeu = 15
     flag_F8_pressed=flag_F11_pressed=flag_quit = flag_create_fig = False
     # N = state_history_size => N=2 capture la vitesse et N>=3 capture la dynamique (accélération/sens)
-    N = 3
+    N = 4
     # 🎮 Space Invaders (invaders ROM) → 60 frames/seconde
     NB_DE_FRAMES_STEP = 4 # 4 on a 15 steps par secondes, 5 correspond à 12 steps par secondes, 6=10 steps par secondes
     # Création de la configuration avec TrainingConfig
@@ -795,13 +795,13 @@ def main():
         # pour un CNN, fournir un tuple (channels, height, width))
         hidden_layers=2,  # Nombre de couches cachées dans le réseau
         # (recommandé : 1 à 3, ici 2 est courant)
-        hidden_size=256,  # Nombre de neurones par couche cachée (512x1 pour Atari en cnn/rainbow, 128x2 ou 256x2 proposé par chatGPT)
+        hidden_size=512,  # Nombre de neurones par couche cachée (512x1 pour Atari en cnn/rainbow, 128x2 ou 256x2 proposé par chatGPT)
         # (recommandé : 64 à 512, 192 est souvent un bon compromis)
         output_size=6,  # Nombre de sorties (actions possibles)
         # (fixe pour Invaders : 6 actions)
-        learning_rate=0.0001,  #0.0000625 pour rainbow (0.001 pour space invaders) et 0.00025 pour DeepMind => Taux d'apprentissage pour l'optimiseur Adam
+        learning_rate=0.0000625,  #0.0000625 pour rainbow (0.001 pour space invaders) et 0.00025 pour DeepMind => Taux d'apprentissage pour l'optimiseur Adam
         # (recommandé : entre 0.0001 et 0.01 pour un bon compromis)
-        gamma=0.99,  # Facteur de discount pour valoriser les récompenses futures 0.99 pour deepmind
+        gamma=0.995,  # Facteur de discount pour valoriser les récompenses futures 0.99 pour deepmind
         # (recommandé : entre 0.9 et 0.9999, ici très élevé pour privilégier l'avenir)
         use_noisy=use_noisy,
         rainbow_eval=rainbow_eval,  # Nombre de steps avant de commencer les evaluations (250 000 pour Rainbow)
@@ -811,7 +811,7 @@ def main():
         epsilon_linear=epsilon_linear,
         epsilon_decay=epsilon_decay,
         epsilon_add=epsilon_add,
-        buffer_capacity=500_000,  # Capacité maximale du replay buffer pour cnn/dreamerv2 10 000 vaut 4 Go de GPU RAM minimum !
+        buffer_capacity=2000_000,  # Capacité maximale du replay buffer pour cnn/dreamerv2 10 000 vaut 4 Go de GPU RAM minimum !
         # (recommandé mlp: de 10 000 à 1 000 000, ici 100 000 est courant)
         batch_size=64,  # Taille du lot d'échantillons pour l'entraînement
         # (recommandé : entre 32 et 256, ici 128)
@@ -821,7 +821,7 @@ def main():
         double_dqn=True,  # Activation du Double DQN (True pour réduire l'overestimation des Q-valeurs)
         dueling=True,
         nstep= True,   # ← option nstep activable
-        nstep_n= 5,      # ← valeur par défaut (3 ou 5) 3 pour rainbow et mais 5 si jeu déterministe
+        nstep_n= 10,      # ← valeur par défaut (3 ou 5) 3 pour rainbow et mais 5 si jeu déterministe
         model_type=model_type,  # Type de modèle : "cnn" pour réseaux convolutionnels, "mlp" pour perceptron multicouche
         # (pour Invaders, un MLP sur l'état vectoriel est souvent utilisé)
         cnn_type=cnn_type, # test d'autre convolution (autre valeur ou si non défini triple convolution)
@@ -928,8 +928,8 @@ def main():
     print(f"Utilisation de l'appareil : {trainer.device}")
     trainer.load_model("./invaders.pth")
     _flag=trainer.load_buffer("./invaders.buffer")
-    # if config.use_noisy and _flag==-1:
-    #     trainer.reset_all_noisy_sigma()
+    if _flag==-1:
+        pass
 
     # Initialisations video OBS
     record = False

@@ -996,7 +996,7 @@ class DQNTrainer:
                     self.replay_buffer.priorities[idx_in_buffer] = checkpoint['priorities'][i].to(self.device)
 
 
-                if (i + 1) % (num_to_load // 20 + 1) == 0 or i == num_to_load - 1: # Progress update
+                if (i + 1) % (num_to_load // 100 + 1) == 0 or i == num_to_load - 1: # Progress update
                     print(f"\r🔄 Chargement du buffer : {i+1}/{num_to_load} ({((i+1)/num_to_load*100):.1f}%)", end="")
             
             # If fewer transitions were loaded than the buffer's current reported size, adjust.
