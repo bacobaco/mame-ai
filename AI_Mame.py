@@ -106,6 +106,7 @@ class GraphWebServer:
 
     def run(self):
         # Démarre le serveur sur l'adresse et le port spécifiés
+        print(f"\n🌍 Serveur Graphique démarré : http://{self.host}:{self.port}/\n")
         self.app.run(host=self.host, port=self.port)
 
     def start(self):
@@ -776,7 +777,7 @@ class DQNTrainer:
                 bn_layers_original_training_state = []
                 if self.dqn.training: # Check if the main model is indeed in training mode
                     for module in self.dqn.modules():
-                        if isinstance(module, nn.BatchNorm1d):
+                        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
                             bn_layers_original_training_state.append((module, module.training))
                             module.eval() # Force BatchNorm1d to use running stats
                 
@@ -889,8 +890,18 @@ class DQNTrainer:
         self.optimizer.zero_grad()
         loss.backward()
         # on peut clipper pour la stabilité   
-        torch.nn.utils.clip_grad_norm_(self.dqn.parameters(), max_norm=10)   
+        torch.nn.utils.clip_grad_norm_(self.dqn.parameters(), max_norm=5)   
         self.optimizer.step() 
+
+        # 7b) Clamp sigma pour empêcher la divergence (NoisyNet)
+        if self.config.use_noisy:
+            with torch.no_grad():
+                for module in self.dqn.modules():
+                    if isinstance(module, NoisyLinear):
+                        # Empêche sigma de dépasser sa valeur initiale (sigma_0 / sqrt(p))
+                        max_sigma = module.sigma_init_value / math.sqrt(module.in_features)
+                        module.sigma_weight.data.clamp_(0.0, max_sigma)
+                        module.sigma_bias.data.clamp_(0.0, max_sigma)
 
         # 8) Mise à jour du réseau cible
         self.training_steps += 1
@@ -914,7 +925,7 @@ class DQNTrainer:
             print(f"{Fore.YELLOW}⚠️ Le fichier {path} n'existe pas. Entraînement à partir de zéro.{Style.RESET_ALL}")
             return
         try:
-            self.dqn.load_state_dict(torch.load(path, map_location=self.device))
+            self.dqn.load_state_dict(torch.load(path, map_location=self.device, weights_only=False))
             self.copy_weights(self.dqn, self.target_dqn) # Ensure target network is also updated
             print(f"{Fore.GREEN}✅ Modèle chargé depuis {path}{Style.RESET_ALL}")
         except Exception as e:
@@ -944,16 +955,16 @@ class DQNTrainer:
             # if the object contains non-serializable parts or complex device logic.
             # However, if GPUReplayBuffer is designed to be serializable:
             torch.save({
-                'states': self.replay_buffer.states[:self.replay_buffer.size].cpu() if self.replay_buffer.store_on_cpu else self.replay_buffer.states[:self.replay_buffer.size].cpu(),
+                'states': self.replay_buffer.states[:self.replay_buffer.size] if self.replay_buffer.store_on_cpu else self.replay_buffer.states[:self.replay_buffer.size].cpu(),
                 'actions': self.replay_buffer.actions[:self.replay_buffer.size].cpu(),
                 'rewards': self.replay_buffer.rewards[:self.replay_buffer.size].cpu(),
-                'next_states': self.replay_buffer.next_states[:self.replay_buffer.size].cpu() if self.replay_buffer.store_on_cpu else self.replay_buffer.next_states[:self.replay_buffer.size].cpu(),
+                'next_states': self.replay_buffer.next_states[:self.replay_buffer.size] if self.replay_buffer.store_on_cpu else self.replay_buffer.next_states[:self.replay_buffer.size].cpu(),
                 'dones': self.replay_buffer.dones[:self.replay_buffer.size].cpu(),
                 'priorities': self.replay_buffer.priorities[:self.replay_buffer.size].cpu() if self.config.prioritized_replay else None,
                 'pos': self.replay_buffer.pos,
                 'size': self.replay_buffer.size,
                 'store_on_cpu_flag_during_save': self.replay_buffer.store_on_cpu # Save the flag used during save
-            }, filename)
+            }, filename, pickle_protocol=4)
             print(f"{Fore.CYAN}💾 Buffer sauvegardé dans {filename} ({self.replay_buffer.size} transitions){Style.RESET_ALL}")
         except Exception as e:
             print(f"{Fore.RED}❌ Erreur de sauvegarde du buffer : {e}{Style.RESET_ALL}")
@@ -963,7 +974,7 @@ class DQNTrainer:
             print(f"{Fore.YELLOW}🟡 Aucun buffer sauvegardé trouvé ({filename}).{Style.RESET_ALL}")
             return -1 # Indicate buffer was not loaded
         try:
-            checkpoint = torch.load(filename, map_location='cpu') # Load to CPU first
+            checkpoint = torch.load(filename, map_location='cpu', weights_only=False) # Load to CPU first
             
             num_to_load = min(checkpoint['size'], self.replay_buffer.capacity)
             print(f"{Fore.GREEN}🟢 Démarrage du chargement du buffer ({num_to_load} transitions depuis {filename}){Style.RESET_ALL}")

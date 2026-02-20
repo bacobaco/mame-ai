@@ -1,469 +1,874 @@
-from datetime import datetime
-import shutil
-import time, keyboard, random, pygame, os, math, psutil,win32gui
+"""
+pacman_ai.py
 
-pygame.mixer.init()  # pour le son au cas où mean_score est stable
-from colorama import Fore, Style, Back
-import torch
-import torch.nn as nn
-import torch.optim as optim
+Version refactorisée de pacman.py pour l'entraînement d'une IA sur Pac-Man via MAME.
+Compatible avec AI_Mame.py et structurée comme invaders.py.
+
+Code: http://cubeman.org/arcade-source/pacman.asm
+"""
+
+import os
+import time
+import shutil
+import random
+import subprocess
+import threading
+import keyboard
 import numpy as np
-from collections import deque, Counter
+import pygame
+import win32gui
+from collections import deque
+from datetime import datetime
+from colorama import Fore, Style
+import matplotlib
+import matplotlib.pyplot as plt
+
+# Imports locaux
 from MameCommSocket import MameCommunicator
 from ScreenRecorder import ScreenRecorder
+from AI_Mame import TrainingConfig, DQNTrainer, GraphWebServer
 
-import subprocess
-from torch.utils.tensorboard import SummaryWriter
+# ==================================================================================================
+# CONSTANTES & ADRESSES MÉMOIRE
+# ==================================================================================================
 
-# Nouvelle importation des classes depuis AI_Mame.py
-from AI_Mame import TrainingConfig, ReplayBuffer, DQN, DQNTrainer
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(f"Utilisation de l'appareil : {device}")
-
-# shortcut = 'E:\\Emulateurs\\Mame Officiel\\mame.exe - puckman - comm python socket.lnk'
-# process = subprocess.Popen(f'cmd.exe /c start "" "{shortcut}"')
-command = [
-    "E:\\Emulateurs\\Mame Officiel\\mame.exe",
-    "-artwork_crop",
-    "-console",
-    "-noautosave",
-    "pacman",
-    "-autoboot_delay",
-    "1",
-    "-autoboot_script",
-    "E:\\Emulateurs\\Mame Sets\\MAME EXTRAs\\plugins\\PythonBridgeSocket.lua",
-]
-process = subprocess.Popen(command, cwd="E:\\Emulateurs\\Mame Officiel")
-time.sleep(10)
-
-# Initialisation socket port unique défini dans PythonBridgeSocket.lua
-comm = MameCommunicator("localhost", 12346)
-time.sleep(5)
-
-# Adresses du jeu Pac-Man
-# Adresses mémoires trouvées via le debugger de MAME
-AdScoreDizaines = "4E80"  
-AdScoreCentaines = "4E81"  
-AdScoreMilliers = "4E82"  
-AdCredits = "4E6E"
-AdPillsAccumulator = "4E0E"  
-AdNbPlayerLive = "4E14"  
-AdPlayerAlive = "4EAE"  
-AdPacManPosX = "4C1A"  
-AdPacManPosY = "4C1B"  
-AdBlinkyPosX = "4C12"  
-AdBlinkyPosY = "4C13"
-AdPinkyPosX = "4C14"  
-AdPinkyPosY = "4C15"
-AdInkyPosX = "4C16"  
-AdInkyPosY = "4C17"
-AdClydePosX = "4C18"  
-AdClydePosY = "4C19"
-
-# La mémoire vidéo se trouve entre $6000 et $63FF (1024 octets)
-AdVideoRamStart = "4000"
-AdVideoRamEnd = "43FF"
-VideoRamLong = 1024
-
-# Liste des actions du jeu demandées au réseau de neurones
-actions = {0: "left", 1: "right", 2: "up", 3: "down"}
-
-def executer_action(action):
-    if actions[action] == "left":
-        comm.communicate([
-            "execute P1_Left(1)",
-            "execute P1_Right(0)",
-            "execute P1_Up(0)",
-            "execute P1_Down(0)",
-        ])
-    elif actions[action] == "right":
-        comm.communicate([
-            "execute P1_Left(0)",
-            "execute P1_Right(1)",
-            "execute P1_Up(0)",
-            "execute P1_Down(0)",
-        ])
-    elif actions[action] == "up":
-        comm.communicate([
-            "execute P1_Left(0)",
-            "execute P1_Right(0)",
-            "execute P1_Up(1)",
-            "execute P1_Down(0)",
-        ])
-    elif actions[action] == "down":
-        comm.communicate([
-            "execute P1_Left(0)",
-            "execute P1_Right(0)",
-            "execute P1_Up(0)",
-            "execute P1_Down(1)",
-        ])
-
-
-def get_score():
-    response = comm.communicate([
-        f"read_memory {AdScoreDizaines}",
-        f"read_memory {AdScoreCentaines}",
-        f"read_memory {AdScoreMilliers}",
-    ])
-    dizaines, centaines, dizaines_de_milliers = map(int, response)
-    dizaines = int(hex(dizaines)[2:])
-    centaines = int(hex(centaines)[2:])
-    dizaines_de_milliers = int(hex(dizaines_de_milliers)[2:])
-    return dizaines + centaines * 100 + dizaines_de_milliers * 10000
-
-def get_state():
-    # Lecture de la mémoire vidéo (0x4000 - 0x43FF) en un seul appel
-    # On utilise la commande "read_memory_range startAddr(hex)(lengthDecimal)"
-    response = comm.communicate([f"read_memory_range {AdVideoRamStart}({VideoRamLong})"])
-    # La réponse est un tableau de 1024 valeurs, séparées par des virgules dans une seule chaîne
-    video_data = np.array(list(map(int, response[0].split(","))))
-
-    # Lecture des positions : Pac-Man et les 4 fantômes
-    positions_response = comm.communicate([
-        f"read_memory {AdPacManPosX}",
-        f"read_memory {AdPacManPosY}",
-        f"read_memory {AdBlinkyPosX}",
-        f"read_memory {AdBlinkyPosY}",
-        f"read_memory {AdPinkyPosX}",
-        f"read_memory {AdPinkyPosY}",
-        f"read_memory {AdInkyPosX}",
-        f"read_memory {AdInkyPosY}",
-        f"read_memory {AdClydePosX}",
-        f"read_memory {AdClydePosY}",
-    ])
-    positions = np.array(list(map(int, positions_response)))
-
-    # Concaténation de la vidéo et des positions pour constituer l'état complet
-    state = np.concatenate([video_data, positions])
-    return state
-
-def nb_parameters(e, H, n, s):
-    parameters = e * n + n
-    if H > 1:
-        parameters += (H - 1) * (n * n + n)
-    parameters += n * s + s
-    return parameters
-
-def create_fig(nb_parties, scores_moyens, fenetre, epsilons, rewards, nb_steps, nb_frames_per_step, filename="Pacman_fig"):
-    import matplotlib.pyplot as plt
-    if nb_parties < 10:
-        print(f"{Fore.RED}Attention ! Création du graphe impossible: le nb de partie est inférieur à 10 !")
-        return 0
-    else:
-        print(f"===> Création du graphe f(épisode)= score moyen (fenêtre de calcul pour {fenetre} parties)")
-        scores_moyens[:10] = [sum(scores_moyens[:10]) / 10] * 10
-    plt.close("all")
-    fig, ax1 = plt.subplots(figsize=(20, 5))
-    ax1.set_xlabel("Episodes/Parties")
-    color = "tab:blue"
-    ax1.set_ylabel("Epsilon en  %", color=color)
-    ax1.plot(list(map(lambda x: int(x * 100), epsilons)), color=color, linestyle="--", zorder=10)
-    ax1.tick_params(axis="y", labelcolor=color)
-    ax1.set_yticks(ax1.get_yticks())
-    ax1.set_yticklabels(map(str, ax1.get_yticks()), rotation=50)
-    ax1.grid(True, which="both", axis="both", linestyle="-", linewidth=0.1, color=color)
-    ax2 = ax1.twinx()
-    color = "tab:red"
-    ax2.set_ylabel(f"Score moyen (pour {fenetre} parties)", color=color, rotation=270, labelpad=10)
-    ax2.plot(scores_moyens, color=color, linestyle="-", zorder=20)
-    ax2.tick_params(axis="y", labelcolor=color)
-    ax2.set_yticks(ax2.get_yticks())
-    ax2.set_yticklabels(map(str, ax2.get_yticks()), rotation=50)
-    ax2.grid(True, which="both", axis="both", linestyle="-", linewidth=0.5, color=color)
-    min_score = min(scores_moyens)
-    max_score = max(scores_moyens)
-    min_score_idx = scores_moyens.index(min_score)
-    max_score_idx = scores_moyens.index(max_score)
-    ax2.annotate(f"Min: {min_score}", xy=(min_score_idx, min_score), xytext=(-10, -10),
-                 textcoords="offset points", ha="center", va="bottom",
-                 bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.5),
-                 arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0"))
-    ax2.annotate(f"Max: {max_score}", xy=(max_score_idx, max_score), xytext=(10, 10),
-                 textcoords="offset points", ha="center", va="top",
-                 bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.5),
-                 arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0"))
-    ax3 = ax1.twinx()
-    ax3.spines["right"].set_position(("outward", 45))
-    color = "tab:green"
-    ax3.set_ylabel("Rewards", color=color, rotation=270, labelpad=10)
-    ax3.plot(rewards, color=color, linestyle=":", linewidth=0.5, zorder=5)
-    ax3.tick_params(axis="y", labelcolor=color)
-    ax3.set_yticks(ax3.get_yticks())
-    ax3.set_yticklabels(map(str, ax3.get_yticks()), rotation=50)
-    ax3.grid(True, which="both", axis="both", linestyle="-.", linewidth=0.3, color=color)
-    ax4 = ax1.twinx()
-    ax4.spines["right"].set_position(("outward", 100))
-    color = "tab:purple"
-    ax4.set_ylabel(f"Nb Steps (nb {nb_frames_per_step} frames/step)", color=color, rotation=270, labelpad=10)
-    ax4.plot(nb_steps, color=color, linewidth=0.5, zorder=1)
-    ax4.tick_params(axis="y", labelcolor=color)
-    ax4.set_yticks(ax4.get_yticks())
-    ax4.set_yticklabels(map(str, ax4.get_yticks()), rotation=50)
-    ax4.grid(True, which="both", axis="both", linestyle="-", linewidth=0.3, color=color)
-    x_min, x_max = ax2.get_xlim()
-    coefficients = np.polyfit(range(len(scores_moyens)), scores_moyens, 1)
-    pente = coefficients[0]
-    trendline = np.poly1d(coefficients)
-    trendline_x = np.linspace(x_min, x_max, len(scores_moyens))
-    ax2.plot(trendline_x, trendline(trendline_x), color="tab:orange")
-    angle = np.arctan(pente) * 180 / np.pi
-    midpoint = len(scores_moyens) / 2
-    ax2.text(midpoint, trendline(midpoint) + trendline(midpoint) * 0.001, f"Pente = {pente:.2f}",
-             color="tab:orange", ha="center", weight="bold",
-             bbox=dict(facecolor="white", alpha=0.5, edgecolor="none"),
-             rotation=angle, rotation_mode="anchor", transform_rotates_text=True)
-    fig.tight_layout()
-    plt.title(f"Evolution du score moyen et d'Epsilon sur {str(nb_parties)} épisodes")
-    plt.savefig(filename+"_"+str(nb_parties)+"_"+datetime.now().strftime("%Y%m%d%H%M")+".png", dpi=300, bbox_inches="tight")
-    return pente
-
-def main():
-    global f2_pressed, flag_create_fig, debug
-    debug=0
-    f2_pressed = flag_create_fig= False
-    vitesse_de_jeu = 10
-    NB_DE_FRAMES_STEP = 5  # nombre de frames par step
-    N = 5
-    num_episodes = 10000
-    ############################################
-    # Configuration réseaux et hyperparamètres   #
-    ############################################
-    # On utilise désormais la mémoire vidéo (1024 valeurs) + 10 valeurs pour les positions (Pac-Man et 4 fantômes)
-    input_size = (VideoRamLong + 10) * N
-    nb_hidden_layer = 2
-    hidden_size = 128
-    output_size = 4  # 4 actions possibles : left, right, up, down
-    state_history = deque(maxlen=N)
-    learning_rate = 0.001
-    gamma = 0.9999
-    bExploration = True
-    epsilon_start = 0.5
-    epsilon_end = 0.01
-    epsilon_decay = 0.99 ** (1.0 / NB_DE_FRAMES_STEP)
-    epsilon_add = 0.0000
-    reward_kill = -5000
-    reward_mult_step = 0.05*NB_DE_FRAMES_STEP
-    buffer_capacity = 200000 if bExploration else 1
-    batch_size = 256 if bExploration else 1
-
-    # Nouvelle création de la configuration et du trainer à partir de AI_Mame.py
-    NB_DE_DEMANDES_PAR_FRAME = str(1+10+3+4+2)
-    config = TrainingConfig(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        output_size=output_size,
-        hidden_layers=nb_hidden_layer,
-        learning_rate=learning_rate,
-        gamma=gamma,
-        epsilon_start=epsilon_start,
-        epsilon_end=epsilon_end,
-        epsilon_decay=epsilon_decay,
-        epsilon_add=epsilon_add,
-        buffer_capacity=buffer_capacity,
-        batch_size=batch_size,
-        state_history_size=N,
-        double_dqn=True  # Active le Double DQN
-    )
-    trainer = DQNTrainer(config)
+class Memory:
+    """
+    Adresses mémoire du jeu Pac-Man (Midway/Namco Hardware).
+    Sources et documentation :
+    - http://cubeman.org/arcade-source/pacman.asm (Pac-Man Assembly Source)
+    - https://github.com/mamedev/mame/blob/master/src/mame/namco/pacman_m.cpp
+    """
+    SCORE_10        = "4E80"  # Score : Chiffre des Dizaines (0-9)
+    SCORE_100       = "4E81"  # Score : Chiffre des Centaines (0-9)
+    SCORE_1000      = "4E82"  # Score : Chiffre des Milliers (0-9)
+    SCORE_10000     = "4E83"  # Score : Chiffre des Dizaines de milliers (0-9)
+    CREDITS         = "4E6E"  # Nombre de crédits (pièces insérées)
+    PILLS_COUNT     = "4E0E"  # Compteur de pilules (utilisé pour les seuils de vitesse/fantômes)
+    LIVES           = "4E14"  # Nombre de vies restantes
+    PLAYER_ALIVE    = "4EAE"  # Flag statut joueur (00 = Mort/Animation, >00 = Normal)
     
-    writer = SummaryWriter('runs/experiment_1')
-    record = False  # Utilise OBS socket server
-    if record:
-        recorder = ScreenRecorder()
-    fenetre_du_calcul_de_la_moyenne = 100
-    collection_of_score = deque(maxlen=fenetre_du_calcul_de_la_moyenne)
-    list_of_mean_scores, list_of_epsilons, list_of_rewards, list_of_nb_steps = [], [], [], []
-    mean_score = mean_score_old = last_score = 0
+    # Positions
+    # Note : Le système de coordonnées est basé sur l'écran vertical (rotation 90°).
+    # 4Dxx : Coordonnées LOGIQUES (Game Logic) utilisées par le CPU pour les collisions/IA.
+    # 4FFx : Coordonnées MATÉRIELLES (Sprite RAM) copiées depuis 4Dxx pour l'affichage.
+    # On utilise 4Dxx pour avoir la position "réelle" gérée par le moteur du jeu.
+    BLINKY_X        = "4D00"  # Blinky X (Logic)
+    BLINKY_Y        = "4D01"  # Blinky Y (Logic)
+    PINKY_X         = "4D02"  # Pinky X
+    PINKY_Y         = "4D03"
+    INKY_X          = "4D04"  # Inky X
+    INKY_Y          = "4D05"
+    CLYDE_X         = "4D06"  # Clyde X
+    CLYDE_Y         = "4D07"
+    PACMAN_X        = "4D08"  # Pac-Man X (Logic)
+    PACMAN_Y        = "4D09"  # Pac-Man Y (Logic)
+    
+    # États des fantômes (Working RAM)
+    GHOST_STATE_BLINKY = "4DA7"
+    GHOST_STATE_PINKY  = "4DA8"
+    GHOST_STATE_INKY   = "4DA9"
+    GHOST_STATE_CLYDE  = "4DAA"
+    
+    # Video RAM (Tilemap)
+    # La mémoire vidéo commence à 0x4000.
+    # L'écran est une grille de 28 colonnes x 36 lignes (total 1008 tuiles, mappé sur 1024 octets).
+    VRAM_START      = "4000"  # Début de la Video RAM
+    VRAM_LEN        = 1024    # Longueur (0x4000 - 0x43FF)
 
-    def is_terminal_in_focus():
-        hwnd = win32gui.GetForegroundWindow()
-        title = win32gui.GetWindowText(hwnd)
-        return title[-20:] == "- Visual Studio Code"
-    def on_key_press(event):
-        global f2_pressed, flag_create_fig, debug
-        if is_terminal_in_focus():
-            # Code à exécuter lorsque la touche est pressée et que le terminal est en focus
-            if keyboard.is_pressed("shift") and keyboard.is_pressed("ctrl") and keyboard.is_pressed("f2"):
-                print("Touche 'F2' détectée. Sortie prématurée de la boucle.")
-                f2_pressed = True
-            elif keyboard.is_pressed("shift") and keyboard.is_pressed("ctrl") and keyboard.is_pressed("f3") and debug > 0:
-                debug = 0
-                print(f"debug={debug}")
-            elif keyboard.is_pressed("shift") and keyboard.is_pressed("ctrl") and keyboard.is_pressed("f4"):
-                debug += debug < 3
-                print(f"debug={debug}")
-                time.sleep(0.2)
-            elif keyboard.is_pressed("shift") and keyboard.is_pressed("ctrl") and keyboard.is_pressed("f7") and not flag_create_fig:
-                print("<=== Demande création d'une figure des scores/episodes")
-                flag_create_fig = True
-    keyboard.on_press(on_key_press)
-    time.sleep(5 / vitesse_de_jeu)  # on attend un peu avant de commencer le jeu
-    response = comm.communicate([
-        "execute P1_start(1)",
-        f"execute throttle_rate({vitesse_de_jeu})",
-        "execute throttled(0)",
-        f"frame_per_step {NB_DE_FRAMES_STEP}",
-    ])
-    print(
-        Style.BRIGHT + Fore.RED + f"[input={input_size//N}*{N}={input_size}]"
-        f"[hidden={hidden_size}*{nb_hidden_layer}#{nb_parameters(input_size, nb_hidden_layer, hidden_size, output_size)}]"
-        f"[output={output_size}]"
-        f"[gamma={gamma}][learning={learning_rate}]"
-        f"[reward_kill={reward_kill}][reward_step={reward_mult_step}]",
-        end="\n",
-    )
-    if bExploration:
-        print(f"[epsilon start={epsilon_start:.2f} end={epsilon_end:.2f} decay={epsilon_decay:.5f} add={epsilon_add:.2f}]", end="")
-    else:
-        print(["epsilon=MODE EXPLOITATION"], end="")
-    print(f"[Replay_size={buffer_capacity}&_samples={batch_size}]"
-          f"[nb_mess_frame={NB_DE_DEMANDES_PAR_FRAME}]"
-          f"[nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]" + Style.RESET_ALL)
-    for episode in range(num_episodes): 
-        if record:
-            recorder.start_recording()
-        step = reward = sum_rewards = player_nb_vies = player_alive = score = 0
-        if f2_pressed:
-            print("Sortie prématurée de la boucle 'for'.")
-            break
-        response = comm.communicate([f"write_memory {AdCredits}(1)"])
-        while player_alive == 0:
-            player_alive = int(comm.communicate([f"read_memory {AdPlayerAlive}"])[0])
-        player_nb_vies = 3
-        flag_in_game = False
-        comm.communicate([f"wait_for {(1+10)*N}"])
-        for _ in range(N):
-            state_history.append(get_state())
-            trainer.state_history.append(get_state())  # Mise à jour de l'historique dans le trainer
-        state = np.concatenate(state_history)
-        while player_nb_vies > 0:
-            if not flag_in_game:
-                comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_FRAME}"])
-                flag_in_game = True
+class GameConstants:
+    ACTIONS = {
+        0: "left", 
+        1: "right", 
+        2: "up", 
+        3: "down"
+    }
+    VRAM_SIZE = 1024
+    NUM_POSITIONS = 14 # Pacman (2) + 4 Ghosts (2*4) + 4 States
 
-            player_nb_vies, player_alive = list(map(
-                int,
-                comm.communicate([f"read_memory {AdNbPlayerLive}", f"read_memory {AdPlayerAlive}"])
-            ))
-            # Utilisation de la méthode select_action du trainer au lieu de choisir_action
-            action = trainer.select_action(state)
-            if debug >= 2: print(f"Action choisi={action}")
-            executer_action(action)
-            _last_score = score
-            score = get_score()
-            reward = round((score - _last_score) ** 2 + (reward_kill if player_alive == 0 else step * reward_mult_step))
-            _sign = np.sign(reward)
-            reward = round(_sign * (abs(reward) ** 0.5))
-            state_history.append(get_state())
-            trainer.state_history.append(get_state())  # Mise à jour de l'historique dans le trainer
-            next_state = np.concatenate(state_history)
-            done = (player_nb_vies == 1 and player_alive == 0)
-            if debug >= 2:
-                print(f"state={state}\nnext ={next_state}")
-            sum_rewards += reward
-            # Utilisation du replay_buffer du trainer
-            trainer.replay_buffer.push(state, action, reward, next_state, done)
-            state = next_state
-            step += 1
-            # Remplacement du bloc de training manuel par la méthode train_step du trainer
-            loss = trainer.train_step()
-            if loss is not None:
-                writer.add_scalar('Loss/train', loss, step)
-            while player_alive == 0 and player_nb_vies > 0:
-                if flag_in_game:
-                    response = comm.communicate(["wait_for 2"])
-                    flag_in_game = False
-                player_nb_vies, player_alive = list(map(
-                    int,
-                    comm.communicate([f"read_memory {AdNbPlayerLive}", f"read_memory {AdPlayerAlive}"])
-                ))
-            if debug >= 1:
-                print(
-                    Fore.BLUE + f"action={actions[action]:<8}episode={episode:<5d}player dans le jeu={player_alive:<2d}nb_vies={player_nb_vies:<2d}"
-                    f" reward={reward:<6d}all rewards={sum_rewards:<7d}nb_mess_step={comm.number_of_messages:<4d}nb_step={step:<5d}score={score:<5d}"
-                    + Style.RESET_ALL
-                )
-            comm.number_of_messages = 0
-        response = comm.communicate(["wait_for 1"])
-        if (episode + 1) % 10 == 0:
-            print("Sauvegarde du modèle...")
-            # Sauvegarde via torch.save sur le modèle du trainer
-            torch.save(trainer.dqn.state_dict(), "./dqn_pacman.pth")
-        if (episode + 1) % 100 == 0:  # Mise à jour complète tous les 100 épisodes
-            print("Synchronisation complète du réseau cible...")
-            DQNTrainer.copy_weights(trainer.dqn, trainer.target_dqn)
-        comm.communicate([f'draw_text(25,1,"Game number: {episode+1:04d} - mean score={mean_score:04.0f} - ba(c)o 2023")'])
-        if record:
-            if score > last_score:
-                time.sleep(1)
-            recorder.stop_recording()
-            time.sleep(0.55)
-            if score > last_score:
-                time.sleep(2)
-                shutil.copy("output-obs.mp4", "best_game.avi")
-                last_score = score
-        if flag_create_fig:
-            _pente = create_fig(
-                episode,
-                list_of_mean_scores,
-                fenetre_du_calcul_de_la_moyenne,
-                list_of_epsilons,
-                list_of_rewards,
-                list_of_nb_steps,
-                NB_DE_FRAMES_STEP,
-            )
-            flag_create_fig = False
-            time.sleep(0.2)
-        collection_of_score.append(score)
-        mean_score_old = mean_score
-        mean_score = round(sum(collection_of_score) / len(collection_of_score), 2)
-        list_of_mean_scores.append(mean_score)
-        list_of_epsilons.append(trainer.epsilon)
-        list_of_rewards.append(sum_rewards)
-        list_of_nb_steps.append(step)
-        # Mise à jour de epsilon via le trainer
-        trainer.update_epsilon(mean_score, mean_score_old)
-        if mean_score == mean_score_old:
-            pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
-        _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(
-            Fore.GREEN + f"N°{episode+1} [{_d}][nb steps={step:4d}][ε={trainer.epsilon:.4f}][rewards={sum_rewards:4d}][score={score:3d}][score moyen={mean_score:.2f}]"
-            + Fore.RESET
+# ==================================================================================================
+# GESTION DE L'INTERFACE DE JEU (MAME)
+# ==================================================================================================
+
+class PacmanInterface:
+    """Gère la communication avec MAME pour Pac-Man."""
+    
+    def __init__(self, communicator: MameCommunicator):
+        self.comm = communicator
+        self.debug = 0
+
+    def execute_action(self, action_code: int):
+        """Envoie les commandes Lua pour exécuter une action."""
+        act = GameConstants.ACTIONS[action_code]
+        
+        left  = 1 if act == "left" else 0
+        right = 1 if act == "right" else 0
+        up    = 1 if act == "up" else 0
+        down  = 1 if act == "down" else 0
+        
+        if self.debug >= 3:
+            print(f"[DEBUG] Action: {act} (L={left}, R={right}, U={up}, D={down})")
+        
+        self.comm.communicate([
+            f"execute P1_Left({left})",
+            f"execute P1_Right({right})",
+            f"execute P1_Up({up})",
+            f"execute P1_Down({down})",
+        ])
+
+    def get_state_mlp(self):
+        """
+        Récupère l'état sous forme de vecteur plat (VRAM + Positions).
+        La VRAM (1024 octets) est essentielle car elle contient la structure du labyrinthe (murs)
+        et l'emplacement des pastilles restantes, permettant au MLP de "voir" l'environnement.
+        
+        INFO MLP vs CNN :
+        - Ici, l'IA reçoit les valeurs brutes et exactes (précision pixel).
+        - MAIS elle perd la notion de 2D (elle ne sait pas qu'une case est voisine d'une autre).
+        - C'est plus robuste aux erreurs de code (pas de reconstruction), mais plus lent à apprendre la géométrie.
+        """
+        # Lecture VRAM
+        response_vram = self.comm.communicate([f"read_memory_range {Memory.VRAM_START}({Memory.VRAM_LEN})"])
+        if not response_vram or not response_vram[0]:
+            video_data = np.zeros(GameConstants.VRAM_SIZE, dtype=np.float32)
+        else:
+            try:
+                raw_list = list(map(int, response_vram[0].split(",")))
+                # Ajustement taille fixe 1024 pour éviter les erreurs de shape
+                if len(raw_list) > GameConstants.VRAM_SIZE: raw_list = raw_list[:GameConstants.VRAM_SIZE]
+                elif len(raw_list) < GameConstants.VRAM_SIZE: raw_list += [0] * (GameConstants.VRAM_SIZE - len(raw_list))
+                
+                raw_data = np.array(raw_list, dtype=np.int16)
+                
+                # Mapping sémantique pour MLP (Contraste fort)
+                video_data = np.full(GameConstants.VRAM_SIZE, -1.0, dtype=np.float32) # Murs/Inaccessible = -1.0
+                video_data[raw_data == 0x40] = 0.0  # Vide (Chemin) = 0.0
+                video_data[raw_data == 0x10] = 1.0  # Pastille = 1.0
+                video_data[raw_data == 0x14] = 1.0  # Power Pellet = 1.0
+            except ValueError:
+                video_data = np.zeros(GameConstants.VRAM_SIZE, dtype=np.float32)
+
+        # Lecture Positions
+        response_pos = self.comm.communicate([
+            f"read_memory {Memory.PACMAN_X}", f"read_memory {Memory.PACMAN_Y}",
+            f"read_memory {Memory.BLINKY_X}", f"read_memory {Memory.BLINKY_Y}",
+            f"read_memory {Memory.PINKY_X}",  f"read_memory {Memory.PINKY_Y}",
+            f"read_memory {Memory.INKY_X}",   f"read_memory {Memory.INKY_Y}",
+            f"read_memory {Memory.CLYDE_X}",  f"read_memory {Memory.CLYDE_Y}",
+            f"read_memory {Memory.GHOST_STATE_BLINKY}",
+            f"read_memory {Memory.GHOST_STATE_PINKY}",
+            f"read_memory {Memory.GHOST_STATE_INKY}",
+            f"read_memory {Memory.GHOST_STATE_CLYDE}",
+        ])
+        
+        if not response_pos or len(response_pos) < 14:
+            positions = np.zeros(GameConstants.NUM_POSITIONS, dtype=np.float32)
+        else:
+            # Traitement séparé : Coordonnées (0-255) et États (0-4)
+            coords = np.array(list(map(int, response_pos[:10])), dtype=np.float32) / 255.0
+            
+            # Traitement des états pour le MLP :
+            # 0 (Normal) -> -1.0 (Danger)
+            # 1 (Blue) ou 2 (Flash) -> 1.0 (Mangeable)
+            # 4 (Eyes) -> 0.0 (Neutre)
+            states = []
+            for s_val in map(int, response_pos[10:]):
+                if s_val == 0: states.append(-1.0)      # Danger
+                elif s_val in [1, 2]: states.append(1.0) # Mangeable
+                else: states.append(0.0)                # Yeux/Autre
+            
+            states_np = np.array(states, dtype=np.float32)
+            positions = np.concatenate([coords, states_np])
+
+        return np.concatenate([video_data, positions])
+
+    def get_state_cnn(self):
+        """
+        Construit une image 64x64 représentant l'état du jeu.
+        - Upscaling VRAM 2x (32x32 -> 64x64) : Suffisant et beaucoup plus rapide.
+        - Positionnement précis des sprites.
+        - Optimisé pour l'architecture 'deepmind'.
+        
+        Note sur les coordonnées :
+        L'image VRAM est brute (Col, Row).
+        Les coordonnées des sprites sont mappées sur cette grille.
+        La rotation pour l'affichage est faite dans Visualizer.
+        
+        INFO CNN vs MLP :
+        - L'IA "voit" les murs et la proximité grâce aux convolutions (vision spatiale).
+        - Elle apprend plus vite les stratégies (coins, couloirs).
+        - CRITIQUE : Si cette fonction dessine les sprites avec un décalage (mauvais offset), l'IA sera aveugle/suicidaire.
+        """
+        # 1. Lecture VRAM (Fond + Pastilles)
+        response_vram = self.comm.communicate([f"read_memory_range {Memory.VRAM_START}({Memory.VRAM_LEN})"])
+        if not response_vram or not response_vram[0]:
+            grid = np.zeros((64, 64), dtype=np.float32)
+        else:
+            try:
+                # VRAM est 1024 octets (32x32 tuiles).
+                raw_list = list(map(int, response_vram[0].split(",")))
+                
+                # --- CORRECTION VRAM (Column-Major -> Row-Major) ---
+                # La VRAM Namco est stockée colonne par colonne.
+                # On doit la reconstruire en grille (Row, Col) correcte.
+                grid_small = np.full((32, 28), -1.0, dtype=np.float32)
+                # MURS = -0.4 (Obstacle statique, distinct du danger mortel -1.0)
+                grid_small = np.full((32, 28), -0.4, dtype=np.float32)
+                
+                for idx, val in enumerate(raw_list):
+                    if idx >= 1024: break
+                    # Mapping Hardware Namco :
+                    # Index = Col * 32 + Row
+                    # Les colonnes visibles sont ~2 à 29. On mappe vers 0-31.
+                    r = idx % 32
+                    # CORRECTION MAJEURE : Alignement Gauche->Droite (Normal)
+                    # On décale de -2 pour centrer les colonnes 2-29 sur 0-27
+                    c = (idx // 32) - 2
+                    
+                    if 0 <= r < 32 and 0 <= c < 28:
+                        if val == 0x40: grid_small[r, c] = 0.0 # Vide
+                        elif val == 0x10: grid_small[r, c] = 0.2 # Pastille (Objectif mineur)
+                        elif val == 0x14: grid_small[r, c] = 0.6 # Power (Objectif majeur)
+                        elif val == 0x10: grid_small[r, c] = 0.4 # Pastille (Plus visible)
+                        elif val == 0x14: grid_small[r, c] = 0.8 # Power (Très attractif)
+                
+                # --- CONTRASTE AMÉLIORÉ ---
+                # Upscaling 32x32 -> 64x64 (Facteur 2)
+                grid = np.kron(grid_small, np.ones((2, 2)))
+            except ValueError as e:
+                if self.debug >= 1: print(f"[ERROR] VRAM reshape error: {e}")
+                grid = np.zeros((64, 56), dtype=np.float32)
+
+        # 2. Lecture Positions (Sprites) pour les superposer
+        response_pos = self.comm.communicate([
+            f"read_memory {Memory.PACMAN_X}", f"read_memory {Memory.PACMAN_Y}",
+            f"read_memory {Memory.BLINKY_X}", f"read_memory {Memory.BLINKY_Y}",
+            f"read_memory {Memory.PINKY_X}",  f"read_memory {Memory.PINKY_Y}",
+            f"read_memory {Memory.INKY_X}",   f"read_memory {Memory.INKY_Y}",
+            f"read_memory {Memory.CLYDE_X}",  f"read_memory {Memory.CLYDE_Y}",
+            f"read_memory {Memory.GHOST_STATE_BLINKY}",
+            f"read_memory {Memory.GHOST_STATE_PINKY}",
+            f"read_memory {Memory.GHOST_STATE_INKY}",
+            f"read_memory {Memory.GHOST_STATE_CLYDE}",
+        ])
+        
+        if response_pos and len(response_pos) >= 14:
+            try:
+                # Correction coordonnées (Hardware Pac-Man):
+                # px (4C00) = Position Verticale (Scanline). MAME: sy = 240 - px.
+                # py (4C01) = Position Horizontale. MAME: sx = py.
+                # Formules calibrées pour grille 64x64 (Upscale 2x de 32x32 tiles)
+                
+                # AJUSTEMENT OFFSETS (Important pour l'alignement visuel F8)
+                # Offset Y = -16 pixels (-2 tuiles) car on a coupé les 2 premières colonnes de la VRAM
+                offset_x, offset_y = -4, -16 
+                
+                # Pacman (Index 0,1)
+                px, py = int(response_pos[0]), int(response_pos[1])
+                
+                # Mapping Coordonnées Sprites -> Grille 64x64 (Centrage)
+                # Les sprites font 16x16 (4x4 sur la grille). On ajoute +2 pour centrer le blob 2x2.
+                # Vertical (Row): (px + offset_x) // 4
+                pr = min(63, max(0, (px + offset_x) // 4))
+                # Horizontal (Col): Inversion Miroir (55 - ...) pour corriger la droite/gauche
+                pc = min(55, max(0, 55 - ((py + offset_y) // 4)))
+                
+                if self.debug >= 2:
+                    print(f"[CNN] Pacman Raw: ({px},{py}) -> Grid: ({pr},{pc})")
+                
+                # Dessiner un "blob" de 2x2 pour Pacman
+                # Pacman = 0.5 (Soi-même, bien visible)
+                # Correction indices : grid[row, col] -> grid[pr, pc]
+                grid[max(0, pr):min(64, pr+2), max(0, pc):min(56, pc+2)] = 0.5 
+
+                # Fantômes (Index 2-9)
+                for i in range(4):
+                    fx, fy = int(response_pos[2 + i*2]), int(response_pos[3 + i*2])
+                    state = int(response_pos[10 + i])
+                    
+                    # Détermination de la valeur sur la grille selon l'état
+                    val = -1.0 # DANGER MORTEL (Plus fort que les murs -0.5)
+                    val = -1.0 # DANGER MORTEL (Distinct des murs -0.4)
+                    
+                    if state == 1 or state == 2: # Blue ou Flash
+                        val = 1.0 # CIBLE PRIORITAIRE (Max Reward)
+                    elif state >= 3: # Eaten (3) ou Eyes (4+)
+                        val = 0.0 # Neutre (Invisible pour collision)
+
+                    fr = min(63, max(0, (fx + offset_x) // 4))
+                    fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
+                    
+                    # Dessiner un "blob" de 2x2 pour chaque fantôme
+                    grid[max(0, fr):min(64, fr+2), max(0, fc):min(56, fc+2)] = val
+                    
+            except: pass
+
+        # La grille est déjà orientée
+        grid = np.ascontiguousarray(grid)
+
+        return grid, 0.0
+
+    def get_score_and_lives(self):
+        """Récupère score, vies et statut."""
+        response = self.comm.communicate([
+            f"read_memory {Memory.SCORE_10}",
+            f"read_memory {Memory.SCORE_100}",
+            f"read_memory {Memory.SCORE_1000}",
+            f"read_memory {Memory.LIVES}",
+            f"read_memory {Memory.PLAYER_ALIVE}",
+            f"read_memory {Memory.PILLS_COUNT}"
+        ])
+        
+        if self.debug >= 3:
+            print(f"[DEBUG] get_score_and_lives raw: {response}")
+        
+        if not response or len(response) < 6:
+            return 0, 0, 0, 0
+
+        try:
+            # Logique originale demandée (BCD via hex string)
+            dizaines, centaines, dizaines_de_milliers = map(int, response[:3])
+            
+            dizaines = int(hex(dizaines)[2:])
+            centaines = int(hex(centaines)[2:])
+            dizaines_de_milliers = int(hex(dizaines_de_milliers)[2:])
+            
+            score = dizaines + centaines * 100 + dizaines_de_milliers * 10000
+            
+            lives = int(response[3])
+            alive_flag = int(response[4])
+            pills = int(response[5])
+            
+            if self.debug >= 2:
+                print(f"[DEBUG] Score: {score}, Lives: {lives}, Alive: {alive_flag}, Pills: {pills}")
+            
+            return score, lives, alive_flag, pills
+        except Exception as e:
+            if self.debug >= 1:
+                print(f"[DEBUG] Error parsing score/lives: {e}")
+            return 0, 0, 0, 0
+
+class StateExtractor:
+    """Helper pour extraire l'état selon le modèle."""
+    def __init__(self, interface: PacmanInterface, model_type):
+        self.interface = interface
+        self.model_type = model_type
+
+    def __call__(self):
+        if self.model_type == "cnn":
+            return self.interface.get_state_cnn()
+        else:
+            return self.interface.get_state_mlp(), 0.0
+
+# ==================================================================================================
+# VISUALISATION
+# ==================================================================================================
+
+class Visualizer:
+    @staticmethod
+    def create_fig(nb_parties, scores_moyens, fenetre, epsilons, rewards, nb_steps, filename="Pacman_fig", high_score=0, label_curve="Epsilon"):
+        matplotlib.use("Agg")
+        plt.close("all")
+        fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
+        
+        ax1.set_xlabel("Episodes")
+        ax1.set_ylabel(label_curve, color="tab:blue")
+        ax1.plot(epsilons, color="tab:blue", linestyle="--", label=label_curve)
+        ax1.tick_params(axis='y', labelcolor="tab:blue")
+        
+        ax2 = ax1.twinx()
+        ax2.set_ylabel("Score Moyen", color="tab:red")
+        ax2.plot(scores_moyens, color="tab:red", label="Score Moyen")
+        ax2.tick_params(axis='y', labelcolor="tab:red")
+        
+        # Ajout des lignes de tendance (comme invaders.py)
+        if len(scores_moyens) > 1:
+            x_all = np.arange(len(scores_moyens))
+            z = np.polyfit(x_all, scores_moyens, 1)
+            p = np.poly1d(z)
+            ax2.plot(x_all, p(x_all), "tab:orange", alpha=0.6)           
+            pente_globale = z[0]
+            # Affichage pente globale
+            angle = np.arctan(pente_globale) * 180 / np.pi
+            midpoint_global = len(scores_moyens) // 2
+            ax2.text(midpoint_global, p(midpoint_global), f"Pente Globale: {pente_globale:.2f}", color="tab:orange", fontweight="bold", ha="center", va="bottom")
+            # Pente locale
+            nb_parties_pente = 1000
+            n = min(nb_parties_pente, len(scores_moyens))
+            x_recent = np.arange(len(scores_moyens)-n, len(scores_moyens))
+            z_recent = np.polyfit(x_recent, scores_moyens[-n:], 1)
+            p_recent = np.poly1d(z_recent)
+            ax2.plot(x_recent, p_recent(x_recent), "tab:purple", linestyle="--")
+            pente_recent = z_recent[0]
+            
+            midpoint = len(scores_moyens) - n // 2
+            ax2.text(midpoint, p_recent(midpoint), f"Pente: {pente_recent:.2f}", color="tab:purple", fontweight="bold")
+
+        ax1.set_title(f"Pacman Training - {nb_parties} episodes - High Score: {high_score}")
+
+        # --- Graphique 2 : Distribution Gaussienne ---
+        if len(scores_moyens) > 1:
+            data = scores_moyens
+            mu = np.mean(data)
+            sigma = np.std(data)
+            
+            if sigma > 0:
+                min_val, max_val = min(data), max(data)
+                # Bins de 50 points
+                start_bin = np.floor(min_val / 50) * 50
+                end_bin = np.ceil(max_val / 50) * 50
+                bins = np.arange(start_bin, end_bin + 51, 50)
+                
+                ax3.hist(data, bins=bins, density=True, alpha=0.6, color='green', edgecolor='black', label='Histogramme')
+                x_gauss = np.linspace(min_val, max_val, 100)
+                y_gauss = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_gauss - mu) / sigma) ** 2)
+                ax3.plot(x_gauss, y_gauss, 'r-', linewidth=2, label=f'Gaussienne (μ={mu:.1f}, σ={sigma:.1f})')
+                ax3.set_xlabel('Score Moyen')
+                ax3.set_ylabel('Densité')
+                ax3.legend()
+                ax3.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(f"{filename}.png")
+        plt.close()
+
+    @staticmethod
+    def afficher_frame(frame):
+        plt.figure(figsize=(6, 6))
+        data_to_show = frame
+        title = "Frame Pacman CNN Input"
+        # Si MLP (vecteur plat), on extrait la partie VRAM pour l'afficher
+        if frame.ndim == 1 and frame.shape[0] >= 1024:
+             data_to_show = frame[:1024].reshape(32, 32)
+             # Rotation 90° vers la droite pour orienter correctement (comme le jeu vertical)
+             data_to_show = np.rot90(data_to_show, k=-1)
+             title = "Frame Pacman (MLP VRAM 32x32)"
+        elif frame.ndim == 2:
+             # La grille est maintenant en ordre normal (Gauche->Droite), plus besoin de flip !
+             data_to_show = frame
+        plt.imshow(data_to_show, cmap="viridis", interpolation="nearest")
+        plt.title(title)
+        plt.colorbar()
+        filename = f"pacman_frame_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(filename, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"Frame sauvegardée : {filename}")
+
+# ==================================================================================================
+# APPLICATION PRINCIPALE
+# ==================================================================================================
+
+class PacmanApp:
+    def __init__(self):
+        self.debug = 0
+        self.flag_quit = False
+        self.flag_create_fig = False
+        self.flag_F8_pressed = False
+        self.is_normal_speed = False
+        self.training_speed = 20.0
+        self.slow_speed = 0.2
+        
+        # Web Server
+        self.web_server = GraphWebServer(graph_dir=".\\", host="0.0.0.0", port=5000)
+        threading.Thread(target=self.web_server.start, daemon=True).start()
+        
+        pygame.mixer.init()
+
+    def log_results(self, nb_episodes, mean_scores, config, nb_mess, nb_step_frame, r_kill, r_step):
+        filename = "d:\\Emulateurs\\Mame Officiel\\plugins\\resultats_pacman.txt"
+        
+        # Trouver le prochain index
+        last_idx = 0
+        if os.path.exists(filename):
+            try:
+                with open(filename, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip() and line[0].isdigit():
+                            parts = line.split('[')
+                            if parts and parts[0].strip().isdigit():
+                                idx = int(parts[0])
+                                if idx > last_idx: last_idx = idx
+            except Exception as e:
+                print(f"Erreur lecture resultats: {e}")
+        next_idx = last_idx + 1
+
+        # Stats
+        start_mean = mean_scores[0] if mean_scores else 0
+        end_mean = mean_scores[-1] if mean_scores else 0
+        max_mean = max(mean_scores) if mean_scores else 0
+        
+        # Formatage
+        input_str = str(config.input_size)
+        hidden_str = f"{config.hidden_size}*{config.hidden_layers}"
+        
+        param_line1 = (f"{next_idx}[input={input_str}][hidden={hidden_str}][output={config.output_size}]"
+                       f"[gamma={config.gamma}][learning={config.learning_rate}]"
+                       f"[reward_kill={r_kill}][reward_step={r_step}]")
+        
+        decay_val = config.epsilon_linear if config.epsilon_linear > 0 else config.epsilon_decay
+        decay_type = "linear" if config.epsilon_linear > 0 else "decay"
+        
+        param_line2 = (f"[epsilon start={config.epsilon_start} end={config.epsilon_end} {decay_type}={decay_val}]"
+                       f"[Replay_size={config.buffer_capacity}&_batch={config.batch_size}]"
+                       f"[nb_mess_frame={nb_mess}][nb_step_frame={nb_step_frame}][speed={self.training_speed}]")
+        
+        comment = (f"=> {nb_episodes} parties. Score moyen: début={start_mean:.2f}, fin={end_mean:.2f}, max={max_mean:.2f}. "
+                   f"Model: {config.model_type}, Noisy: {config.use_noisy}, Double: {config.double_dqn}, Dueling: {config.dueling}, PER: {config.prioritized_replay}")
+
+        try:
+            with open(filename, "a", encoding="utf-8") as f:
+                f.write(f"\n\n{param_line1}\n{param_line2}\n{comment}")
+            print(f"{Fore.CYAN}📝 Résultats sauvegardés dans {filename}{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}❌ Erreur écriture resultats: {e}{Style.RESET_ALL}")
+
+    def launch_mame(self):
+        command = [
+            "D:\\Emulateurs\\Mame Officiel\\mame.exe",
+            "-window", "-resolution", "448x576",
+            "-skip_gameinfo",
+            "-artwork_crop",
+            "-sound", "none",
+            "-console",
+            "-noautosave",
+            "pacman",
+            "-autoboot_delay", "1",
+            "-autoboot_script", "D:\\Emulateurs\\Mame Sets\\MAME EXTRAs\\plugins\\PythonBridgeSocket.lua",
+        ]
+        # Utilisation de startupinfo pour minimiser la fenêtre console si besoin
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 7 # Minimisé
+        
+        self.process = subprocess.Popen(command, cwd="D:\\Emulateurs\\Mame Officiel", startupinfo=startupinfo, stderr=subprocess.DEVNULL)
+        time.sleep(10)
+
+    def setup_keyboard(self, trainer, config, comm):
+        def on_key_press(event):
+            def is_terminal_in_focus():
+                hwnd = win32gui.GetForegroundWindow()
+                title = win32gui.GetWindowText(hwnd)
+                return title[-20:] == "- Visual Studio Code"
+
+            if is_terminal_in_focus():
+                if keyboard.is_pressed("shift") and keyboard.is_pressed("ctrl"):
+                    if keyboard.is_pressed("f2"):
+                        print("\n[F2] Sortie demandée.")
+                        self.flag_quit = True
+                    elif keyboard.is_pressed("f3"):
+                        self.debug = 0
+                        print(f"\n[F3] Debug désactivé.")
+                    elif keyboard.is_pressed("f4"):
+                        self.debug = (self.debug + 1) % 4
+                        print(f"\n[F4] Debug level: {self.debug}")
+                    elif keyboard.is_pressed("f5"):
+                        self.is_normal_speed = not self.is_normal_speed
+                        new_speed = self.slow_speed if self.is_normal_speed else self.training_speed
+                        comm.communicate([f"execute throttle_rate({new_speed})"])
+                        print(f"\n[F5] Vitesse : {'Low (' + str(self.slow_speed) + ')' if self.is_normal_speed else f'Rapide ({self.training_speed})'}")
+                    elif keyboard.is_pressed("f6"):
+                        self.slow_speed = round(self.slow_speed + 0.1, 1)
+                        print(f"\n[F6] Vitesse lente ajustée : {self.slow_speed}")
+                        if self.is_normal_speed:
+                            comm.communicate([f"execute throttle_rate({self.slow_speed})"])
+                    elif keyboard.is_pressed("f10"):
+                        trainer.epsilon = min(1.0, trainer.epsilon + 0.1)
+                        print(f"\n[F10] Epsilon augmenté : {trainer.epsilon:.3f}")
+                    elif keyboard.is_pressed("f11"):
+                        trainer.epsilon = max(config.epsilon_end, trainer.epsilon - 0.1)
+                        print(f"\n[F11] Epsilon diminué : {trainer.epsilon:.3f}")
+                    elif keyboard.is_pressed("f7") and not self.flag_create_fig:
+                        print("\n[F7] Création figure demandée.")
+                        self.flag_create_fig = True
+                    elif keyboard.is_pressed("f8"):
+                        print("\n[F8] Affichage Frame demandé.")
+                        self.flag_F8_pressed = True
+                    elif keyboard.is_pressed("f9"):
+                        new_mode = "exploitation" if config.mode == "exploration" else "exploration"
+                        print(f"\n[F9] Mode changé vers : {new_mode}")
+                        config.mode = new_mode
+                        trainer.set_mode(new_mode)
+
+        keyboard.on_press(on_key_press)
+
+    def run(self):
+        # Config
+        RESUME = False # Mettre à True pour reprendre l'entraînement (après le premier run réussi)
+        RESUME = False # RESTART OBLIGATOIRE : Nouvelle représentation visuelle (Murs != Fantômes)
+        model_type = "cnn" # "cnn" ou "mlp" - MLP recommandé pour Pacman (VRAM indices)
+        N = 4 # Stack size (Standard Atari pour bien capter le mouvement)
+        NB_DE_FRAMES_STEP = 4 # Plus réactif pour ne pas rater les virages (Pacman va vite)
+        # Calcul du nombre de messages par step pour la synchro wait_for
+        # Action(4) + State(15: 1 VRAM + 14 Pos/States) + Score(6) = 25
+        NB_DE_DEMANDES_PAR_STEP = 25
+        
+        model_filename = f"pacman_{model_type}.pth"
+        best_model_filename = f"pacman_{model_type}_best.pth"
+        
+        if model_type == "cnn":
+            # (N, H, W)
+            input_size = (N, 64, 56)
+        else:
+            input_size = GameConstants.VRAM_SIZE + GameConstants.NUM_POSITIONS
+
+        # Calcul automatique du decay pour l'exploration
+        epsilon_start = 0.1 if RESUME else 1.0 # 1.0 pour nouveau run, 0.1 pour reprise
+        epsilon_start = 1.0 # On force le restart complet
+        # Objectif final d'exploration
+        epsilon_end = 0.05
+        
+        # Utilisation d'une décroissance linéaire basée sur les steps (plus stable que par épisode)
+        target_steps_for_epsilon_end = 500_000 
+        epsilon_linear = (epsilon_start - epsilon_end) / target_steps_for_epsilon_end
+        epsilon_decay = 0.0
+        
+        print(f"Configuration Epsilon: Linear Decay ({epsilon_linear:.8f}/step) pour atteindre {epsilon_end} en {target_steps_for_epsilon_end} steps.")
+
+        use_noisy = False # Activation NoisyNet (Rainbow) - DÉSACTIVÉ pour stabilité
+
+        config = TrainingConfig(
+            state_history_size=N,
+            input_size=input_size,
+            hidden_layers=2,
+            hidden_size=256, # Standard CNN
+            output_size=4,
+            learning_rate=0.00025, # Standard CNN
+            learning_rate=0.0001, # Réduit pour plus de stabilité et éviter l'oubli catastrophique
+            gamma=0.99,
+            use_noisy=use_noisy,
+            buffer_capacity=100000,
+            batch_size=64, # Standard pour PER
+            min_history_size=20000, # Remplissage plus rapide
+            cnn_type="deepmind", # Architecture optimisée pour la vitesse et l'efficacité
+            model_type=model_type,
+            epsilon_start=epsilon_start,
+            epsilon_end=epsilon_end,
+            epsilon_linear=epsilon_linear,
+            epsilon_decay=epsilon_decay, 
+            epsilon_add=0.0,
+            double_dqn=True,
+            dueling=True,
+            nstep=True,       # Rainbow: N-Step Returns
+            nstep_n=3,        # 3 steps
+            prioritized_replay=True # Rainbow: PER
         )
-    torch.save(trainer.dqn.state_dict(), "./dqn_pacman.pth")
-    time.sleep(5)
-    if record:
-        print(recorder.stop_recording())
-        time.sleep(5)
-        print(recorder.ws.disconnect())
-    print(create_fig(
-        episode,
-        list_of_mean_scores,
-        fenetre_du_calcul_de_la_moyenne,
-        list_of_epsilons,
-        list_of_rewards,
-        list_of_nb_steps,
-        NB_DE_FRAMES_STEP,
-        filename="PACMAN_FINAL",
-    ))
-    print(process.terminate())
-    print(
-        Style.BRIGHT + Fore.RED + f"[input={input_size//N}*{N}={input_size}]"
-        f"[hidden={hidden_size}*{nb_hidden_layer}#{nb_parameters(input_size, nb_hidden_layer, hidden_size, output_size)}]"
-        f"[output={output_size}]"
-        f"[gamma={gamma}][learning={learning_rate}]"
-        f"[reward_kill={reward_kill}][reward_step={reward_mult_step}]",
-        end="\n",
-    )
-    if bExploration:
-        print(f"[epsilon start={epsilon_start:.2f} end={epsilon_end:.2f} decay={epsilon_decay:.5f} add={epsilon_add:.2f}]", end="")
-    else:
-        print(["epsilon=MODE EXPLOITATION"], end="")
-    print(f"[Replay_size={buffer_capacity}&_samples={batch_size}]"
-          f"[nb_mess_frame={NB_DE_DEMANDES_PAR_FRAME}]"
-          f"[nb_step_frame={NB_DE_FRAMES_STEP}][speed={vitesse_de_jeu}]" + Style.RESET_ALL)
 
+        print(f"Configuration Input Size: {input_size} (Model: {model_type})")
+        self.launch_mame()
+        comm = MameCommunicator("localhost", 12346) # Port défini dans Lua pour Pacman
+        game = PacmanInterface(comm)
+        config.state_extractor = StateExtractor(game, model_type)
+        
+        trainer = DQNTrainer(config)
+        self.setup_keyboard(trainer, config, comm)
+        
+        # Load if exists
+        if RESUME:
+            # Priorité au chargement du BEST model pour récupérer d'une chute de performance
+            if os.path.exists(best_model_filename):
+                print(f"{Fore.CYAN}♻️ RÉCUPÉRATION : Chargement du modèle BEST ({best_model_filename}) pour annuler la chute libre.{Style.RESET_ALL}")
+                trainer.load_model(best_model_filename)
+            elif os.path.exists(model_filename):
+                trainer.load_model(model_filename)
+
+        if RESUME and os.path.exists("pacman.buffer"):
+            trainer.load_buffer("pacman.buffer")
+
+        # Stats
+        scores = deque(maxlen=100)
+        mean_scores = []
+        epsilons = []
+        rewards_hist = []
+        steps_hist = []
+        best_mean_score = 0
+        high_score = 0
+        
+        print("Démarrage entraînement Pacman...")
+        time.sleep(5)  # Temps pour se préparer avant le lancement
+        # Init MAME
+        comm.communicate([
+            f"write_memory {Memory.CREDITS}(1)",
+            "execute P1_start(1)",
+            f"execute throttle_rate({self.training_speed})", # Vitesse max
+            "execute throttled(0)",
+            f"frame_per_step {NB_DE_FRAMES_STEP}"
+        ])
+
+        for episode in range(10000):
+            comm.communicate(["wait_for 0"])
+            if self.flag_quit: break
+            
+            game.debug = self.debug
+            if self.debug >= 1:
+                print(f"\n[DEBUG] === Episode {episode} Start ===")
+            
+            # Reset
+            comm.communicate([
+                f"write_memory {Memory.CREDITS}(1)",
+                "execute P1_start(1)"
+            ])
+            
+            # Wait for start
+            alive = 0
+            wait_start_timer = time.time()
+            while alive == 0:
+                _, _, alive, _ = game.get_score_and_lives()
+                # Si le jeu ne démarre pas après 3 secondes, on réinsère une pièce et on appuie sur Start
+                if time.time() - wait_start_timer > 3.0:
+                    if self.debug >= 1: print("[DEBUG] Timeout start -> Relance P1_Start...")
+                    comm.communicate([f"write_memory {Memory.CREDITS}(1)", "execute P1_start(1)"])
+                    wait_start_timer = time.time()
+                time.sleep(0.1)
+            
+            # Init history
+            trainer.state_history.clear()
+            for _ in range(N):
+                s, _ = config.state_extractor() # s est (32,32) pour CNN ou (1034,) pour MLP
+                trainer.state_history.append(s)
+            
+            # Stack initial
+            if model_type == "cnn":
+                current_state_stack = np.stack(trainer.state_history, axis=0)
+            else:
+                current_state_stack = np.concatenate(trainer.state_history)
+            
+            score = 0
+            step = 0
+            _, lives, _, _ = game.get_score_and_lives() # Initialisation correcte des vies
+            done = False
+            sum_rewards = 0
+            
+            while not done:
+                if self.flag_quit: break
+
+                # Synchro MAME : On attend que Lua soit prêt à recevoir exactement ce nombre de commandes pour cette frame
+                comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
+
+                # Action
+                action = trainer.select_action(current_state_stack)
+                game.execute_action(action)
+                
+                # Observe
+                next_frame, _ = config.state_extractor()
+                
+                if self.flag_F8_pressed:
+                    Visualizer.afficher_frame(next_frame)
+                    self.flag_F8_pressed = False
+
+                new_score, new_lives, alive, pills = game.get_score_and_lives()
+                
+                if self.debug >= 2:
+                    print(f"[DEBUG] Step {step} | Act: {GameConstants.ACTIONS[action]} | Score: {new_score} | Lives: {new_lives} | Alive: {alive} | Pills: {pills} | Msgs: {comm.number_of_messages}")
+                comm.number_of_messages = 0 # Reset compteur messages
+                
+                # Reward Shaping
+                reward = 0
+                # Récompense pour le score
+                if new_score > score:
+                    reward += (new_score - score) / 10.0 
+                
+                # Pénalité de mort
+                if new_lives < lives:
+                    reward -= 50 
+                    lives = new_lives
+                
+                # Pénalité de temps (légère) pour encourager l'action
+                reward -= 0.01 # Réduit pour éviter le suicide tactique
+                
+                score = new_score
+                sum_rewards += reward
+                
+                # Update Stack
+                trainer.state_history.append(next_frame)
+                if model_type == "cnn":
+                    next_state_stack = np.stack(trainer.state_history, axis=0)
+                else:
+                    next_state_stack = np.concatenate(trainer.state_history)
+                
+                # Check Game Over
+                if alive == 0 and lives == 0:
+                    done = True
+                    reward -= 10
+                
+                # Store & Train
+                trainer.replay_buffer.push(current_state_stack, action, reward, next_state_stack, done)
+                trainer.train_step()
+                
+                current_state_stack = next_state_stack
+                step += 1
+                
+                # Gestion mort (attente respawn)
+                if alive == 0 and lives > 0:
+                    # Attendre que le joueur soit de nouveau en vie
+                    if self.debug >= 1: print("[DEBUG] Player died. Waiting for respawn...")
+                    wait_respawn_timer = time.time()
+                    while lives == 0:
+                        _, lives, alive, _ = game.get_score_and_lives()
+                        # Timeout de sécurité : si le respawn est trop long (>8s), c'est un Game Over
+                        if time.time() - wait_respawn_timer > 8.0:
+                            if self.debug >= 1: print("[DEBUG] Respawn timeout -> Game Over assumed.")
+                            done = True
+                            break
+
+            # End Episode
+            scores.append(score)
+            high_score = max(high_score, score)
+            mean = sum(scores) / len(scores)
+            mean_scores.append(mean)
+            
+            if use_noisy:
+                sigmas = trainer.dqn.get_sigma_values()
+                avg_sigma = sum(sigmas.values()) / len(sigmas) if sigmas else 0
+                epsilons.append(avg_sigma)
+            else:
+                epsilons.append(trainer.epsilon)
+
+            rewards_hist.append(sum_rewards)
+            steps_hist.append(step)
+            
+            explo_str = f"Sigma: {epsilons[-1]:.3f}" if use_noisy else f"Epsilon: {trainer.epsilon:.3f}"
+            print(f"{Fore.GREEN}Episode {episode} finished. Score: {score}. Mean: {mean:.2f}. {explo_str}{Style.RESET_ALL}")
+            
+            # Sauvegarde Best Model
+            if len(scores) >= 100 and mean > (best_mean_score + 5):
+                best_mean_score = mean
+                trainer.save_model(best_model_filename)
+                print(f"{Fore.YELLOW}🏆 Record moyen ({best_mean_score:.2f}) ! Sauvegarde best.{Style.RESET_ALL}")
+                try: pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
+                except: pass
+            
+            if episode % 10 == 0:
+                trainer.save_model(model_filename)
+                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, "Pacman_fig", high_score, label_curve="Sigma" if use_noisy else "Epsilon")
+            
+            if episode % 100 == 0:
+                trainer.save_buffer("pacman.buffer")
+
+            if self.flag_create_fig:
+                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, "Pacman_fig_manual", high_score, label_curve="Sigma" if use_noisy else "Epsilon")
+                self.flag_create_fig = False
+
+        trainer.save_model(model_filename)
+        
+        # Sauvegarde du meilleur modèle avec stats dans le nom sur demande F2 (ou fin)
+        if os.path.exists(best_model_filename):
+            base_name = f"pacman_{model_type}_best_{episode}ep_HS{high_score}"
+            best_with_stats = f"{base_name}.pth"
+            try:
+                shutil.copy(best_model_filename, best_with_stats)
+                print(f"{Fore.CYAN}🏆 Meilleur modèle sauvegardé sous : {best_with_stats}{Style.RESET_ALL}")
+                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, base_name, high_score, label_curve="Sigma" if use_noisy else "Epsilon")
+                print(f"{Fore.CYAN}📊 Figure finale sauvegardée sous : {base_name}.png{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}❌ Erreur copie best model: {e}{Style.RESET_ALL}")
+
+        trainer.save_buffer("pacman.buffer")
+        
+        if episode >= 1000:
+            self.log_results(episode, mean_scores, config, NB_DE_DEMANDES_PAR_STEP, NB_DE_FRAMES_STEP, -50, -0.1)
+            
+        self.process.terminate()
 
 if __name__ == "__main__":
-    main()
+    app = PacmanApp()
+    app.run()

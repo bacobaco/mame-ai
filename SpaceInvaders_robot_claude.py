@@ -478,6 +478,7 @@ def main():
     # Configuration et lancement de MAME
     command = [
         "E:\\Emulateurs\\Mame Officiel\\mame.exe",
+        "-window", "-resolution", "448x576",
         "-artwork_crop",
         "-console",
         "-noautosave",

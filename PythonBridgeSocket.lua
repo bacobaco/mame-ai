@@ -145,7 +145,9 @@ local function receive_from_python()
             if data == "__end__" then
                 break
             end
-            table.insert(messages, data)
+            if data ~= "" then
+                table.insert(messages, data)
+            end
         elseif err == "timeout" or err == "wantread" then
             break
         elseif err == "closed" then
@@ -252,18 +254,31 @@ local frame_per_step           = 1
 local x, y, _str               = 40, 10, ""
 
 --------------------------------------------------------------------------------
+-- Affichage à l'écran
+--------------------------------------------------------------------------------
+local function draw_on_screen()
+    -- On vérifie que x et y ne sont pas nil ET qu'ils sont convertibles en nombres
+    local posX = tonumber(x)
+    local posY = tonumber(y)
+
+    if posX and posY and _str then
+        screen:draw_text(posX, posY, _str)
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Fonction main() appelée chaque frame MAME
 --------------------------------------------------------------------------------
 local function main()
     frame = frame + 1
-    if debug then print("frame:", frame) end
+    -- if debug then print("frame:", frame) end
     -- Affichage de stats toutes les 100000 frames
     if frame % 100000 == 0 then
         print(
             "[" .. os.date() .. "]" ..
             "all frames:" .. frame .. " - frames_in_game:" .. frame_in_game ..
             " - " .. tostring(nb_messages_total_in_game) .. " messages traités => " ..
-            tostring(nb_messages_total_in_game * 100 // frame_in_game / 100) .. " asks/frame_in_game " ..
+            tostring(frame_in_game > 0 and (nb_messages_total_in_game * 100 // frame_in_game / 100) or 0) .. " asks/frame_in_game " ..
             "[" .. tostring(nb_messages_total_in_game * 100 // frame / 100) .. "/frame]" ..
             " (frame_per_step=" .. tostring(frame_per_step) .. ")"
         )
@@ -352,6 +367,9 @@ local function main()
                         table.insert(responses,
                                      "ERR: COMMANDE NON COMPRISE!" .. tostring(message_from_python))
                         print("ERR: COMMANDE NON COMPRISE! (" .. tostring(message_from_python) .. ")")
+                        io.write("WaitFor#" .. wait_for_messages .. '/#' .. messages_in_game .. '<#' ..
+                                     #responses .. "\n")
+                        --os.exit()
                     end
                 end
 
@@ -396,17 +414,10 @@ local function main()
             nb_messages_total_in_game = nb_messages_total_in_game + messages_in_game
         end
     end
-end
-
---------------------------------------------------------------------------------
--- Affichage à l'écran
---------------------------------------------------------------------------------
-local function draw_on_screen()
-    screen:draw_text(tonumber(x), tonumber(y), _str)
+    draw_on_screen()
 end
 
 --------------------------------------------------------------------------------
 -- Enregistrement des callbacks
 --------------------------------------------------------------------------------
-emu.register_frame_done(draw_on_screen)
-emu.register_frame(main)
+emu.register_frame_done(main)

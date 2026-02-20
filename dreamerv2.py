@@ -645,7 +645,7 @@ class DreamerTrainer:
             print(f"Model file not found: {path}")
             return -1
         try:
-            data = torch.load(path, map_location=self.device)
+            data = torch.load(path, map_location=self.device, weights_only=False)
             self.encoder.load_state_dict(data['encoder'])
             self.decoder.load_state_dict(data['decoder'])
             self.rssm.load_state_dict(data['rssm'])

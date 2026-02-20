@@ -69,3 +69,15 @@ apres100+2500 parties décroissance 550pts...
 12[input=1034*1=1034][hidden=20*1#20784][output=4][GAMMA=0.99999][learning=1e-05][reward_kill=-25000000][reward_step=1]
 [epsilon start=0.90 end=0.00 decay=0.98952 add=0.00][Replay_size=200000&_samples=2000][nb_mess_frame=1043][nb_step_frame=10][speed=5]
 1000 parties 660pts... exploitation nulle ! 4000 parties de plus exploitation nulle, y"a forcément un problème
+
+13[input=1038][hidden=512*2][output=4][gamma=0.99][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=100000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 1489 parties. Score moyen: début=230.00, fin=626.00, max=712.00. Model: mlp, Noisy: True, Double: True, Dueling: True, PER: True
+
+14[input=(4, 64, 64)][hidden=256*2][output=4][gamma=0.99][learning=0.00025][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=100000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 5829 parties. Score moyen: début=480.00, fin=354.20, max=513.50. Model: cnn, Noisy: True, Double: True, Dueling: True, PER: True
+
+15[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.00025][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=100000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 2234 parties. Score moyen: début=460.00, fin=377.50, max=575.20. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True

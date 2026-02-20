@@ -7,13 +7,14 @@ import zlib
 
 class MameCommunicator:
     def __init__(self, host="127.0.0.1", port=12345):
+        self.debug = False
         self.host = host
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
         self.sock.settimeout(1000) 
         self.number_of_messages=0
-        self.debug = False
+
 
     def send_to_lua(self, messages):
         message_str = '\n'.join(messages) + '\n__end__\n'
