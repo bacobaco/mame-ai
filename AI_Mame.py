@@ -15,6 +15,7 @@ import atexit
 from flask import Flask, send_from_directory, render_template_string
 from colorama import Fore, Style
 import time
+import socket
 
 class GraphWebServer:
     def __init__(
@@ -104,9 +105,23 @@ class GraphWebServer:
             # Sert le fichier depuis le dossier graph_dir
             return send_from_directory(self.graph_dir, filename)
 
+    def get_local_ip(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # N'établit pas de connexion réelle, sert juste à déterminer l'interface de sortie
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
     def run(self):
         # Démarre le serveur sur l'adresse et le port spécifiés
-        print(f"\n🌍 Serveur Graphique démarré : http://{self.host}:{self.port}/\n")
+        local_ip = self.get_local_ip()
+        print(f"\n🌍 Serveur Graphique démarré :")
+        print(f"   👉 Sur ce PC : http://127.0.0.1:{self.port}/")
+        print(f"   👉 Sur le réseau (Mobile) : http://{local_ip}:{self.port}/\n")
         self.app.run(host=self.host, port=self.port)
 
     def start(self):
@@ -189,6 +204,7 @@ class TrainingConfig:
     cnn_type: str = "default"  # ✅ AJOUTER ICI
     state_extractor: callable = None  # Fonction d'extraction d'état
     mode: str = "exploration"  # "exploration" pour l'entraînement, "exploitation" (inference) pour la phase finale
+    optimize_memory: bool = False # ✅ Nouvelle option pour contrôler la compression uint8
 
 class GPUReplayBuffer:
     def __init__(self, capacity, config, prioritized=False, alpha=0.5, optimize_memory=False):
@@ -605,11 +621,11 @@ class DQNModel(nn.Module):
             elif config.cnn_type == "precise":
                 self.encoder = nn.Sequential(
                     nn.Conv2d(channels, 32, kernel_size=5, stride=1, padding=2),
-                    nn.BatchNorm2d(32),
+                    nn.GroupNorm(8, 32), # ✅ Remplacement BatchNorm -> GroupNorm (Plus stable pour RL)
                     nn.ReLU(),
                     nn.MaxPool2d(kernel_size=2),
                     nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-                    nn.BatchNorm2d(64),
+                    nn.GroupNorm(8, 64), # ✅ Remplacement BatchNorm -> GroupNorm
                     nn.ReLU(),
                     nn.MaxPool2d(kernel_size=2),
                 )
@@ -733,7 +749,7 @@ class DQNTrainer:
         self.criterion = nn.MSELoss()
         # Utilisation du ReplayBuffer classique (échantillonnage uniforme)
         self.replay_buffer = GPUReplayBuffer(
-            config.buffer_capacity, config, prioritized=config.prioritized_replay, optimize_memory=(config.model_type == "cnn")
+            config.buffer_capacity, config, prioritized=config.prioritized_replay, optimize_memory=config.optimize_memory
         )
 
         if config.nstep:

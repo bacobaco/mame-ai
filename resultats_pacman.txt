@@ -81,3 +81,27 @@ apres100+2500 parties décroissance 550pts...
 15[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.00025][reward_kill=-50][reward_step=-0.1]
 [epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=100000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
 => 2234 parties. Score moyen: début=460.00, fin=377.50, max=575.20. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True
+
+16[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=200000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 1834 parties. Score moyen: début=450.00, fin=290.60, max=523.90. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True
+
+17[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=200000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 1529 parties. Score moyen: début=460.00, fin=299.50, max=540.60. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True
+
+18[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=200000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 7194 parties. Score moyen: début=440.00, fin=304.00, max=510.00. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True
+
+19[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.05 linear=1.8999999999999998e-06][Replay_size=200000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 1606 parties. Score moyen: début=410.00, fin=1793.70, max=1832.80. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True
+
+20[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.99][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=0.2 end=0.02 linear=1.8000000000000002e-07][Replay_size=200000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 4278 parties. Score moyen: début=720.00, fin=2750.00, max=2950.90. Model: cnn, Noisy: False, Double: True, Dueling: True, PER: True
+
+21[input=(4, 64, 56)][hidden=256*2][output=4][gamma=0.995][learning=0.0001][reward_kill=-50][reward_step=-0.1]
+[epsilon start=1.0 end=0.02 linear=9.8e-07][Replay_size=200000&_batch=64][nb_mess_frame=25][nb_step_frame=4][speed=20.0]
+=> 3667 parties. Score moyen: début=430.00, fin=3418.30, max=3750.00. Model: cnn, Noisy: True, Double: True, Dueling: True, PER: True

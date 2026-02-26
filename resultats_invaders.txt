@@ -206,7 +206,7 @@ je relance (e=0.2) retrouve rapidement (200 parties) les 550pts ! mais grosse va
 
 20[input=10*1=10][HIDDEN=22*1#311][output=3][gamma=0.9999][learning=0.001][REWARD_KILL=-1000][reward_alive=0][reward_step=0.0]
 [epsilon start, end, decay=1,0.1,0.99999][Replay_size=10000&_samples=1000][nb_mess_frame=18][nb_step_frame=4][speed=5]
-=> "reward only kills", après 1300 parties 600pts de moyenne (690 au max) après 2 relances 700pts de moyenne et max 1890pts! <<<<<<<<<<<<<<<<<<<<<<<
+==========> "reward only kills", après 1300 parties 600pts de moyenne (690 au max) après 2 relances 700pts de moyenne et max 1890pts! <<<<<<<<<<<<<<<<<<<<<<<
 je relance encore après ~600 parties et avec reward_add =0.005: 600pts de moyen
 
 ############## JE REMETS LE TIR EN ACTION et Y POS Aliens avec reward négatif ##########################

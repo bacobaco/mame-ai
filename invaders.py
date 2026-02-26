@@ -295,7 +295,7 @@ class Visualizer:
     @staticmethod
     def create_fig(trainer, NB_DE_FRAMES_STEP, nb_parties, scores_moyens, fenetre_lissage, 
                    epsilons_or_sigmas, high_score, flag_aliens, flag_boucliers, 
-                   steps_cumules, reward_str="", filename="Invaders_fig", nb_parties_pente=1000):
+                   steps_cumules, reward_str="", filename="Invaders_fig", nb_parties_pente=1000, max_scores=None):
         
         matplotlib.use("Agg")
         fig, ax1 = plt.subplots(figsize=(12, 8), constrained_layout=True)
@@ -305,15 +305,23 @@ class Visualizer:
         ax1.set_ylabel("Sigma FC-In (bleu)/FC-Out (orange)" if trainer.config.use_noisy else "Epsilon", color="tab:blue", fontsize=7, fontweight="bold")
         
         if trainer.config.use_noisy:
-            ax1.plot(epsilons_or_sigmas[0], color="tab:blue", linestyle="dashed", lw=0.8)
-            ax1.plot(epsilons_or_sigmas[1], color="tab:orange", linestyle="dashdot", lw=0.8)
+            ax1.plot(epsilons_or_sigmas[0], color="tab:blue", linestyle="dashed", lw=0.8, label="Sigma In (Cachée)")
+            ax1.plot(epsilons_or_sigmas[1], color="tab:orange", linestyle="dashdot", lw=0.8, label="Sigma Out (Actions)")
+            ax1.legend(loc="upper left", fontsize=8)
         else:
-            ax1.plot(epsilons_or_sigmas[0], color="tab:blue", linestyle="dashed")
+            ax1.plot(epsilons_or_sigmas[0], color="tab:blue", linestyle="dashed", label="Epsilon")
+            ax1.legend(loc="upper left", fontsize=8)
             
         # Score moyen
         ax2 = ax1.twinx()
-        ax2.set_ylabel("Score moyen", color="tab:red", rotation=270, labelpad=15, fontsize=8, fontweight="bold")
-        ax2.plot(scores_moyens, color="tab:red")
+        ax2.set_ylabel("Score (Moyen & Max)", color="tab:red", rotation=270, labelpad=15, fontsize=8, fontweight="bold")
+        ax2.plot(scores_moyens, color="tab:red", label="Score Moyen")
+        
+        # Ajout courbe Max Score
+        if max_scores and len(max_scores) == len(scores_moyens):
+            ax2.plot(max_scores, color="tab:green", alpha=0.3, linestyle="-", linewidth=1, label="Max Score (fenêtre)")
+        
+        ax2.legend(loc="upper right", fontsize=8)
         
         # Steps cumulés
         ax3 = ax1.twinx()
@@ -448,6 +456,7 @@ class InvadersApp:
         """Boucle principale de l'application."""
         
         # 1. Configuration
+        RESUME = True # Reprise de l'entraînement (Conservation des réflexes d'esquive)
         N = 4 # Historique
         NB_DE_FRAMES_STEP = 3
         model_type = "cnn" # "mlp", "cnn", "dreamer"
@@ -464,7 +473,7 @@ class InvadersApp:
             factor_div_frame = 2
             input_size = (N,) + tuple(x // factor_div_frame for x in full_frame_2D)
             NB_DE_DEMANDES_PAR_STEP = str(2 + 3 + 4) # 2(state: img+aliens) + 3(action) + 4(score/status)
-            TRAIN_EVERY_N_GLOBAL_STEPS = 4 # Optimisation vitesse : on entraîne moins souvent (tous les 8 steps)
+            TRAIN_EVERY_N_GLOBAL_STEPS = 4 # Optimisation vitesse : on entraîne moins souvent (tous les 4 steps)
         elif model_type.lower() == "mlp":
             flag_aliens = True
             flag_boucliers = False
@@ -482,18 +491,19 @@ class InvadersApp:
 
         # Rewards
         reward_clipping_deepmind = False  # Ne PAS clipper avec des rewards custom (sinon step=-1 == mort=-1)
-        reward_aliens_mult = 0.1         # Alien 10pts -> +1.0 reward.
-        reward_kill = -10.0              # Augmenté (-10) pour rendre le suicide tactique non rentable (vs +3 max par alien)
+        reward_aliens_mult = 1.0         # Alien 10pts -> +10.0 reward. (Doublé pour agressivité MAX)
+        reward_kill = -20.0              # Réduit (-50 -> -20) pour moins de peur
         reward_alive = 0.0              # Réduit drastiquement pour éviter le camping passif.
-        reward_mult_step = 0.0  # très léger
-        mult_reward_state = 0.0          # Augmenté: la descente doit coûter plus cher que la survie ne rapporte.
-        reward_end_of_game = -10.0       # game over sévère
+        reward_mult_step = -0.01        # Légère pression temporelle (comme Pacman)
+        mult_reward_state = 0.0          # DÉSACTIVÉ (Cause de l'explosion des rewards et instabilité)
+        reward_end_of_game = -100.0      # Game Over inacceptable (-10 -> -100)
+        reward_fire_penalty = 0.0        # DÉSACTIVÉ (Laisser tirer à volonté pour débloquer l'agressivité)
         
         # Exploration
-        use_noisy = False                # Désactivé pour garantir la précision en fin d'apprentissage
-        epsilon_start = 1.0
+        use_noisy = True                # ACTIVÉ (Comme Pacman Elite)
+        epsilon_start = 0.6 if RESUME else 1.0 # Augmenté (0.2 -> 0.6) pour forcer la sortie du "coin gauche"
         epsilon_end = 0.02               # On garde 2% d'aléatoire pour ne pas figer totalement
-        target_steps_for_epsilon_end = 500_000 # Exploration plus longue (500k steps) pour bien apprendre le début
+        target_steps_for_epsilon_end = 1_000_000 # Exploration longue (1M steps)
         epsilon_linear = (epsilon_start - epsilon_end) / target_steps_for_epsilon_end
         epsilon_decay = 0
         epsilon_add = ((epsilon_start - epsilon_end) / target_steps_for_epsilon_end) * NB_DE_FRAMES_STEP * 100 if not use_noisy else 0.0
@@ -505,8 +515,8 @@ class InvadersApp:
             hidden_layers=2,
             hidden_size=256,
             output_size=6,
-            learning_rate=0.00025,
-            gamma=0.99,
+            learning_rate=0.0001, # Réduit pour stabilité (comme Pacman)
+            gamma=0.995, # Augmenté pour vision long terme (comme Pacman)
             use_noisy=use_noisy,
             rainbow_eval=250_000,
             rainbow_eval_pourcent=5,  # 5% du temps en évaluation (standard Rainbow)
@@ -517,7 +527,7 @@ class InvadersApp:
             epsilon_add=epsilon_add,
             buffer_capacity=200_000, # Réduit à ~13 Go pour éviter de saturer la RAM/Disque
             batch_size=64,
-            min_history_size=50000,  # compromis raisonnable (Rainbow = 80k)
+            min_history_size=20000,  # Démarrage plus rapide (comme Pacman)
             prioritized_replay=True,
             target_update_freq=10000,
             double_dqn=True,
@@ -526,7 +536,8 @@ class InvadersApp:
             nstep_n=3,
             model_type=model_type,
             cnn_type=cnn_type,
-            mode="exploration"
+            mode="exploration",
+            optimize_memory=True # ✅ Invaders utilise [0,1], l'optimisation est sûre et économise la RAM
         )
 
         # 2. Initialisation Système
@@ -547,8 +558,29 @@ class InvadersApp:
             trainer = DQNTrainer(config)
         
         print(f"Device: {trainer.device}")
-        trainer.load_model("./invaders.pth")
-        trainer.load_buffer("./invaders.buffer")
+        
+        # Gestion Sauvegarde / Reprise / Archivage
+        model_filename = "./invaders.pth"
+        best_model_filename = "./invaders_best.pth"
+        buffer_filename = "./invaders.buffer"
+
+        if RESUME:
+            if os.path.exists(best_model_filename):
+                print(f"{Fore.CYAN}♻️ RÉCUPÉRATION : Chargement du modèle BEST ({best_model_filename}){Style.RESET_ALL}")
+                trainer.load_model(best_model_filename)
+            elif os.path.exists(model_filename):
+                trainer.load_model(model_filename)
+        else:
+            # Archivage automatique
+            if os.path.exists(model_filename) or os.path.exists(best_model_filename):
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                print(f"{Fore.YELLOW}⚠️ Archivage de la session précédente vers *_backup_{ts}...{Style.RESET_ALL}")
+                if os.path.exists(model_filename): shutil.move(model_filename, f"{model_filename}_backup_{ts}")
+                if os.path.exists(best_model_filename): shutil.move(best_model_filename, f"{best_model_filename}_backup_{ts}")
+                if os.path.exists(buffer_filename): shutil.move(buffer_filename, f"{buffer_filename}_backup_{ts}")
+
+        if RESUME and os.path.exists(buffer_filename):
+            trainer.load_buffer(buffer_filename)
 
         self.setup_keyboard(trainer, config)
         
@@ -560,6 +592,7 @@ class InvadersApp:
         fenetre_moyenne = 100
         collection_score = deque(maxlen=fenetre_moyenne)
         list_mean_scores = []
+        max_scores_hist = []
         list_eps_sigmas = [[], []]
         list_cumul_steps = []
         mean_score = mean_score_old = last_score = high_score = best_mean_score = 0
@@ -630,7 +663,6 @@ class InvadersApp:
                 NewGameStarting = int(comm.communicate([f"read_memory {Memory.NUM_ALIENS}"])[0])
                 time.sleep(0.01)
             
-            comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
             start_steps_time = time.time()
             nb_vies = 3
             
@@ -640,6 +672,7 @@ class InvadersApp:
 
             # --- Boucle de jeu (Step) ---
             while NotEndOfGame == 1:
+                comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
                 # 1. Action
                 if config.model_type.lower() == "dreamer":
                     action = trainer.dreamer_step(current_loop_obs_stack, prev_action_value)
@@ -659,17 +692,30 @@ class InvadersApp:
                 score, PlayerIsOK, NotEndOfGame = game.get_score_and_status(_last_score)
 
                 # 4. Reward
-                if PlayerIsOK == 1:
+                if NotEndOfGame == 0:
+                    # Game Over (Invasion ou fin de vies)
+                    reward = reward_end_of_game
+                    if PlayerIsOK == 1: # Le joueur est vivant mais le jeu coupe -> INVASION !
+                         reward -= 500.0 # PÉNALITÉ MASSIVE (Pire que tout)
+                    done = True
+                elif PlayerIsOK == 1:
                     reward = reward_alive
+                    done = False
                 elif nb_vies > 1:
                     reward = reward_kill
+                    done = False
                 else:
                     reward = reward_kill + reward_end_of_game
+                    done = True
+
+                # Ajout pénalité de tir (si pas mort/fini)
+                if not done and action in [1, 3, 5]: 
+                    reward += reward_fire_penalty
+
                 reward += ((score - _last_score) * reward_aliens_mult) + (reward_mult_step) + reward_state_comp
                 if reward_clipping_deepmind: reward = np.sign(reward)
                 
                 sum_rewards += reward
-                done = (PlayerIsOK == 0)
 
                 # 5. Stack Update
                 invaders_loop_frame_history.append(next_frame)
@@ -748,13 +794,12 @@ class InvadersApp:
                         _, PlayerIsOK, NotEndOfGame = game.get_score_and_status(score)
                     if PlayerIsOK == 1:
                         nb_vies -= 1
-                        comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
                     if NotEndOfGame == 0 and config.model_type.lower() == "dreamer":
                         trainer.store_transition(current_loop_obs_stack, action, reward, next_obs_stack, True)
 
             # --- Fin Episode ---
             comm.communicate(["wait_for 1"])
-            comm.communicate([f'draw_text(25,1,"Game number: {episode+1:04d} - mean score={mean_score:04.0f} - ba(c)o 2026")'])
+            #comm.communicate([f'draw_text(25,1,"Game number: {episode+1:04d} - mean score={mean_score:04.0f} - ba(c)o 2026")'])
             if record:
                 recorder.stop_recording()
                 if score > last_score:
@@ -767,7 +812,7 @@ class InvadersApp:
             if self.flag_create_fig:
                 reward_str = f"R_alive={reward_alive}, R_step={reward_mult_step}, R_kill={reward_kill}"
                 Visualizer.create_fig(trainer, NB_DE_FRAMES_STEP, episode, list_mean_scores, fenetre_moyenne,
-                                      list_eps_sigmas, high_score, flag_aliens, flag_boucliers, list_cumul_steps, reward_str, "Invaders_fig_ask")
+                                      list_eps_sigmas, high_score, flag_aliens, flag_boucliers, list_cumul_steps, reward_str, "Invaders_fig_ask", max_scores=max_scores_hist)
                 self.flag_create_fig = False
 
             # Logging Sigmas/Epsilon
@@ -777,6 +822,11 @@ class InvadersApp:
                 s2 = sigmas.get("advantage_head", 0.0) if config.dueling else sigmas.get("output_layer", 0.0)
                 list_eps_sigmas[0].append(s1)
                 list_eps_sigmas[1].append(s2)
+                
+                # Calculs pour affichage console
+                avg_sigma = sum(sigmas.values()) / len(sigmas) if sigmas else 0
+                min_sigma = min(sigmas.values()) if sigmas else 0
+                max_sigma = max(sigmas.values()) if sigmas else 0
             else:
                 list_eps_sigmas[0].append(trainer.epsilon)
 
@@ -785,11 +835,12 @@ class InvadersApp:
             mean_score_old = mean_score
             mean_score = round(sum(collection_score) / len(collection_score), 2)
             list_mean_scores.append(mean_score)
+            max_scores_hist.append(max(collection_score) if collection_score else 0)
             
             if score > high_score: high_score = score
             
             # Sauvegarde Best Model
-            if episode >= fenetre_moyenne and mean_score > best_mean_score:
+            if episode >= fenetre_moyenne and mean_score > (best_mean_score + 5):
                 best_mean_score = mean_score
                 trainer.save_model("./invaders_best.pth")
                 print(f"{Fore.YELLOW}🏆 Record moyen ({best_mean_score}) ! Sauvegarde best.{Style.RESET_ALL}")
@@ -808,9 +859,7 @@ class InvadersApp:
             # Console Log
             _d = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if config.use_noisy:
-                sigma_vals = trainer.dqn.get_sigma_values()
-                sigma_str = ", ".join([f"{name} = {val:.6f}" for name, val in sigma_vals.items()])
-                exploration_str = f"[sigma {sigma_str}]"
+                exploration_str = f"[sigma avg={avg_sigma:.4f} min={min_sigma:.4f} max={max_sigma:.4f}]"
             else:
                 exploration_str = f"[ε={trainer.epsilon:.4f}]"
             exploration_str = exploration_str if config.mode != "exploitation" else "[*** Mode EXPLOITATION ***]"
@@ -827,7 +876,7 @@ class InvadersApp:
                 trainer.save_model("./invaders.pth")
                 reward_str = f"R_alive={reward_alive}, R_step={reward_mult_step}, R_kill={reward_kill}"
                 Visualizer.create_fig(trainer, NB_DE_FRAMES_STEP, episode, list_mean_scores, fenetre_moyenne,
-                                      list_eps_sigmas, high_score, flag_aliens, flag_boucliers, list_cumul_steps, reward_str)
+                                      list_eps_sigmas, high_score, flag_aliens, flag_boucliers, list_cumul_steps, reward_str, max_scores=max_scores_hist)
 
 
             # Sauvegarde buffer périodique (sécurité anti-crash)
