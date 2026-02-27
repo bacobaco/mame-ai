@@ -1,5 +1,19 @@
-# info sur les paramètres et résultats de rainbow
-# https://paperswithcode.com/paper/rainbow-combining-improvements-in-deep/review/?hl=19877
+"""
+AI_Mame.py
+
+Cœur de l'intelligence artificielle pour MAME.
+Ce module implémente un agent Rainbow DQN complet (Double, Dueling, NoisyNet, PER, N-Step).
+
+Structure du fichier :
+1. Utilitaires (Serveur Web, Logger)
+2. Configuration (TrainingConfig)
+3. Mémoire & Replay Buffer
+4. Architecture Réseau (DQNModel, NoisyLinear)
+5. Entraînement (DQNTrainer)
+
+Référence Rainbow DQN : https://paperswithcode.com/paper/rainbow-combining-improvements-in-deep/review/?hl=19877
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +28,6 @@ from datetime import datetime
 import atexit
 from flask import Flask, send_from_directory, render_template_string
 from colorama import Fore, Style
-import time
 import socket
 
 class GraphWebServer:
@@ -129,7 +142,10 @@ class GraphWebServer:
         self.run()
 
 class TeeLogger:
-    """Capture les sorties du terminal (stdout et stderr) tout en les enregistrant dans un fichier."""
+    """
+    Redirige la sortie standard (stdout/stderr) vers un fichier log tout en continuant
+    d'afficher dans la console. Utile pour garder une trace des entraînements longs.
+    """
 
     def __init__(self, log_dir="logs"):
         os.makedirs(log_dir, exist_ok=True)  # Crée le dossier logs s'il n'existe pas
@@ -171,8 +187,16 @@ logger = TeeLogger()
 # ✅ Fermeture propre des logs à la fin du script (PLACÉ À LA FIN)
 atexit.register(logger.close)
 
+# ==================================================================================================
+# 2. CONFIGURATION
+# ==================================================================================================
+
 @dataclass
 class TrainingConfig:
+    """
+    Configuration globale des hyperparamètres de l'entraînement.
+    Regroupe tous les paramètres pour DQN, l'exploration, et le modèle.
+    """
     input_size: any  # Pour MLP, un int ; pour CNN, un tuple (channels, height, width)
     state_history_size: int
     hidden_size: int
@@ -206,7 +230,15 @@ class TrainingConfig:
     mode: str = "exploration"  # "exploration" pour l'entraînement, "exploitation" (inference) pour la phase finale
     optimize_memory: bool = False # ✅ Nouvelle option pour contrôler la compression uint8
 
+# ==================================================================================================
+# 3. GESTION DE LA MÉMOIRE (REPLAY BUFFER)
+# ==================================================================================================
+
 class GPUReplayBuffer:
+    """
+    Buffer d'expérience optimisé pour GPU (ou CPU avec compression).
+    Gère le stockage des transitions et l'échantillonnage (Prioritized Experience Replay).
+    """
     def __init__(self, capacity, config, prioritized=False, alpha=0.5, optimize_memory=False):
         self.capacity = capacity
         self.config = config
@@ -245,6 +277,7 @@ class GPUReplayBuffer:
 
 
     def push(self, state, action, reward, next_state, done):
+        """Ajoute une transition (s, a, r, s', d) dans le buffer."""
         if self.store_on_cpu: # CNN with memory optimization
             # Assuming state and next_state are numpy arrays in [0,1] float
             self.states[self.pos] = (state * 255).astype(np.uint8)
@@ -276,6 +309,7 @@ class GPUReplayBuffer:
 
 
     def sample(self, batch_size):
+        """Échantillonne un batch de transitions (avec priorités si PER activé)."""
         if self.prioritized:
             if self.size == 0: return None # Cannot sample from empty buffer
             # Calculate probabilities from priorities
@@ -312,38 +346,6 @@ class GPUReplayBuffer:
             indices, # For PER updates
             weights, # For PER loss weighting
         )            
-    def old_sample(self, batch_size, beta=None):
-        indices = torch.randint(0, self.size, (batch_size,), device=self.device)
-        weights = torch.ones(batch_size, device=self.device)
-        if self.store_on_cpu:
-            states_batch = torch.tensor(self.states[indices.cpu().numpy()], dtype=torch.float32, device=self.device) / 255.0
-            next_states_batch = torch.tensor(self.next_states[indices.cpu().numpy()], dtype=torch.float32, device=self.device) / 255.0
-        else:
-            states_batch = self.states.index_select(0, indices)
-            next_states_batch = self.next_states.index_select(0, indices)
-
-        actions_batch = self.actions.index_select(0, indices)
-        rewards_batch = self.rewards.index_select(0, indices)
-        dones_batch = self.dones.index_select(0, indices)
-
-        if self.prioritized:
-            prios = self.priorities[: self.size] ** self.alpha
-            probs = prios / prios.sum()
-            indices = torch.multinomial(probs, batch_size, replacement=False)
-            weights = (self.size * probs[indices]) ** (-beta if beta else self.beta)
-            weights = weights / weights.max()
-            self.beta = min(1.0, self.beta + self.beta_increment)
-
-        return (
-            states_batch,
-            actions_batch,
-            rewards_batch,
-            next_states_batch,
-            dones_batch,
-            indices,
-            weights,
-        )
-
     def update_priorities(self, batch_indices, batch_priorities):
         if not self.prioritized:
             return
@@ -358,6 +360,10 @@ class GPUReplayBuffer:
         return self.size
     
 class NStepTransitionWrapper:
+    """
+    Wrapper pour calculer les retours N-Step (récompenses cumulées sur N étapes).
+    Améliore la convergence en propageant les récompenses plus vite.
+    """
     def __init__(self, n, gamma):
         self.n = n
         self.gamma = gamma
@@ -422,7 +428,15 @@ class NStepTransitionWrapper:
             multi_step_transitions.append((s0, a0, n_step_reward, final_next_state, final_done))
         return multi_step_transitions
 
+# ==================================================================================================
+# 4. ARCHITECTURE RÉSEAU (DQN & MODULES)
+# ==================================================================================================
+
 class NoisyLinear(nn.Module):
+    """
+    Couche linéaire bruitée pour l'exploration (Noisy Nets).
+    Remplace l'exploration Epsilon-Greedy par un bruit paramétré dans les poids du réseau.
+    """
     def __init__(self, in_features, out_features, sigma_init=0.5):
         super(NoisyLinear, self).__init__()
         self.in_features = in_features
@@ -509,68 +523,6 @@ class NoisyLinear(nn.Module):
         # Retourne la moyenne absolue des paramètres sigma (pour monitoring)
         return self.sigma_weight.abs().mean().item(), self.sigma_bias.abs().mean().item()
 
-
-class OLD_NoisyLinear(nn.Module):
-    def __init__(self, in_features, out_features, sigma_init=0.5):
-        super(NoisyLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-
-        self.mu_weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.sigma_weight = nn.Parameter(torch.full((out_features, in_features), sigma_init))
-        self.mu_bias = nn.Parameter(torch.empty(out_features))
-        self.sigma_bias = nn.Parameter(torch.full((out_features,), sigma_init))
-
-        # ✅ Permet l'entraînement de sigma
-        self.sigma_weight.requires_grad = True
-        self.sigma_bias.requires_grad = True
-
-        self.register_buffer("epsilon_weight", torch.zeros(out_features, in_features))
-        self.register_buffer("epsilon_bias", torch.zeros(out_features))
-
-        self.sigma_init = sigma_init
-        self.reset_parameters()
-        self.reset_noise()
-
-    def reset_parameters(self):
-        mu_range = 1 / math.sqrt(self.in_features)
-        self.mu_weight.data.uniform_(-mu_range, mu_range)
-        self.mu_bias.data.uniform_(-mu_range, mu_range)
-        
-        # S'assurer que sigma est initialisé à sigma_init si ce n'est pas déjà modifié
-        # (par exemple, par un chargement de state_dict ou une modification manuelle)
-        # Cette condition est un peu simpliste, mais vise à éviter de réinitialiser des sigmas déjà appris.
-        # Une meilleure approche pourrait impliquer de vérifier si les données sont exactement égales à sigma_init.
-        if torch.all(self.sigma_weight.data == self.sigma_init) and torch.all(self.sigma_bias.data == self.sigma_init):
-             pass # Déjà initialisé ou pas besoin de réinitialiser
-        else: # Ou si vous voulez toujours forcer l'initialisation de sigma à sigma_init au début:
-            self.sigma_weight.data.fill_(self.sigma_init)
-            self.sigma_bias.data.fill_(self.sigma_init)
-
-    def _scale_noise(self, size):
-        # Version améliorée de la génération de bruit factoriel
-        # plus stable pour l'apprentissage
-        x = torch.randn(size)
-        return x.sign() * torch.sqrt(torch.abs(x))
-
-    def reset_noise(self):
-        device = self.mu_weight.device
-        epsilon_in = self._scale_noise(self.in_features).to(device)
-        epsilon_out = self._scale_noise(self.out_features).to(device)
-        self.epsilon_weight = epsilon_out.ger(epsilon_in)
-        self.epsilon_bias = epsilon_out
-
-    def forward(self, input):
-        if self.training:
-            weight = self.mu_weight + self.sigma_weight * self.epsilon_weight
-            bias = self.mu_bias + self.sigma_bias * self.epsilon_bias
-        else:
-            weight = self.mu_weight
-            bias = self.mu_bias
-        return F.linear(input, weight, bias)
-
-    def get_sigma(self):
-        return self.sigma_weight.abs().mean().item(), self.sigma_bias.abs().mean().item()
 
 ############################ Comparatif des architectures CNN #######################################
 #  Mode       | Nb conv | Stride fort | MaxPool | FC size estimé | Total Ops        | Vitesse       #
@@ -732,7 +684,18 @@ class DQNModel(nn.Module):
         for module in self.modules():
             if isinstance(module, NoisyLinear):  module.reset_noise()
 
+# ==================================================================================================
+# 5. ENTRAÎNEUR (TRAINER)
+# ==================================================================================================
+
 class DQNTrainer:
+    """
+    Classe principale gérant la boucle d'apprentissage.
+    - Sélection d'action
+    - Calcul de la perte (Loss)
+    - Mise à jour des poids (Backprop)
+    - Gestion du réseau cible (Target Network)
+    """
     def __init__(self, config: TrainingConfig):
         self.config = config
         self.device = torch.device(config.device)
@@ -777,6 +740,7 @@ class DQNTrainer:
             self.target_dqn.train()    
 
     def select_action(self, state: np.ndarray) -> int:
+        """Sélectionne une action selon la politique actuelle (NoisyNet ou Epsilon-Greedy)."""
         state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
         action: int
 
@@ -829,6 +793,7 @@ class DQNTrainer:
                 # If it was eval, it stays eval, which is fine.
         return action            
     def update_epsilon(self):
+        """Met à jour le taux d'exploration (si NoisyNet n'est pas utilisé)."""
         if self.config.use_noisy: return # No epsilon decay for NoisyNet
         if self.config.epsilon_linear > 0:
             self.epsilon = max(self.config.epsilon_end, self.epsilon - self.config.epsilon_linear)
@@ -836,6 +801,7 @@ class DQNTrainer:
             self.epsilon = max(self.config.epsilon_end, self.epsilon * self.config.epsilon_decay)
 
     def train_step(self) -> Optional[float]:
+        """Effectue une étape d'apprentissage (Forward + Backward + Update)."""
         if self.config.rainbow_eval > 0:
             if (self.training_steps + 1) % self.config.rainbow_eval == 0 and self.eval_steps == 0:
                 print(f"{Fore.MAGENTA}🌈 Starting Rainbow evaluation phase...{Style.RESET_ALL}")
@@ -934,9 +900,11 @@ class DQNTrainer:
 
         return loss.item()
     def save_model(self, path: str) -> None:
+        """Sauvegarde les poids du modèle."""
         torch.save(self.dqn.state_dict(), path)
         print(f"{Fore.CYAN}💾 Modèle sauvegardé dans {path}{Style.RESET_ALL}")
     def load_model(self, path: str) -> None:
+        """Charge les poids du modèle."""
         if not os.path.exists(path):
             print(f"{Fore.YELLOW}⚠️ Le fichier {path} n'existe pas. Entraînement à partir de zéro.{Style.RESET_ALL}")
             return
@@ -947,23 +915,6 @@ class DQNTrainer:
         except Exception as e:
             print(f"{Fore.RED}❌ Erreur lors du chargement du modèle depuis {path}: {e}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}⚠️ Entraînement à partir de zéro suite à l'erreur de chargement.{Style.RESET_ALL}")
-
-    def update_state_history(self, state: np.ndarray) -> np.ndarray:
-        """Met à jour l'historique d'état et retourne l'état correct"""
-        self.state_history.append(state)
-        while len(self.state_history) > self.config.state_history_size:
-            self.state_history.popleft()  # Supprime les frames les plus anciennes
-
-        assert (
-            len(self.state_history) == self.config.state_history_size
-        ), f"Erreur: state_history contient {len(self.state_history)} frames, attendu {self.config.state_history_size}."
-
-        if self.config.model_type.lower() == "cnn":
-            return np.stack(list(self.state_history), axis=0)  # Retourne (N, H, W)
-        else:
-            return np.concatenate(
-                self.state_history, axis=0
-            )  # ✅ Retourne `N` états concaténés
 
     def save_buffer(self, filename="buffer.pt"): # Changed extension to .pt for PyTorch convention
         try:
@@ -986,6 +937,7 @@ class DQNTrainer:
             print(f"{Fore.RED}❌ Erreur de sauvegarde du buffer : {e}{Style.RESET_ALL}")
 
     def load_buffer(self, filename="buffer.pt"):
+        """Charge l'état du Replay Buffer depuis le disque."""
         if not os.path.exists(filename):
             print(f"{Fore.YELLOW}🟡 Aucun buffer sauvegardé trouvé ({filename}).{Style.RESET_ALL}")
             return -1 # Indicate buffer was not loaded

@@ -18,6 +18,7 @@ import numpy as np
 import pygame
 import psutil
 import win32gui
+import sys
 from collections import deque
 from datetime import datetime
 from colorama import Fore, Style
@@ -31,7 +32,7 @@ from AI_Mame import TrainingConfig, DQNTrainer, GraphWebServer
 from dreamerv2 import DreamerTrainer
 
 # ==================================================================================================
-# CONSTANTES & ADRESSES MÉMOIRE
+# CONSTANTES & ADRESSES MÉMOIRE https://www.computerarcheology.com/Arcade/SpaceInvaders/RAMUse.html
 # ==================================================================================================
 
 class Memory:
@@ -209,7 +210,7 @@ class InvadersInterface:
         
         columns = all_bytes.reshape(224, 32)
         columns = columns[16:208, :]  # Crop Horizontal
-        cropped_columns = columns[:, 3:25]  # Crop Vertical
+        cropped_columns = columns[:, 3:28]  # Crop Vertical (25 colonnes = 200px, inclut la Soucoupe sans le score)
         image = np.unpackbits(cropped_columns, axis=1, bitorder="little")
 
         if factor_div > 1:
@@ -230,16 +231,17 @@ class InvadersInterface:
         """
         response_grouped = self.comm.communicate([
             f"read_memory {Memory.P1_SCORE_L}", f"read_memory {Memory.P1_SCORE_M}",
-            f"read_memory {Memory.PLAYER_OK}", f"read_memory {Memory.PLAYER_1_ALIVE}"
+            f"read_memory {Memory.PLAYER_OK}", f"read_memory {Memory.PLAYER_1_ALIVE}",
+            f"read_memory {Memory.P1_SHIPS_REM}"
         ])
         
-        if not response_grouped or len(response_grouped) < 4:
-            return last_score, 0, 0 # Erreur, on garde le score et on suppose mort/fin pour sécurité
+        if not response_grouped or len(response_grouped) < 5:
+            return last_score, 0, 0, 0 # Erreur, on garde le score et on suppose mort/fin pour sécurité
         
-        P1ScorL_v, P1ScorM_v, PlayerIsOK, NotEndOfGame = list(map(int, response_grouped))
+        P1ScorL_v, P1ScorM_v, PlayerIsOK, NotEndOfGame, lives = list(map(int, response_grouped))
         score = (P1ScorL_v >> 4) * 10 + (P1ScorM_v & 0x0F) * 100 + ((P1ScorM_v) >> 4) * 1000
         
-        return score, PlayerIsOK, NotEndOfGame
+        return score, PlayerIsOK, NotEndOfGame, lives
 
 class StateExtractor:
     """Classe helper pour extraire l'état selon la configuration (MLP/CNN)."""
@@ -314,12 +316,18 @@ class Visualizer:
             
         # Score moyen
         ax2 = ax1.twinx()
-        ax2.set_ylabel("Score (Moyen & Max)", color="tab:red", rotation=270, labelpad=15, fontsize=8, fontweight="bold")
+        ax2.set_ylabel("Score Moyen", color="tab:red", rotation=270, labelpad=15, fontsize=8, fontweight="bold")
         ax2.plot(scores_moyens, color="tab:red", label="Score Moyen")
+        ax2.tick_params(axis='y', labelcolor="tab:red")
         
         # Ajout courbe Max Score
         if max_scores and len(max_scores) == len(scores_moyens):
-            ax2.plot(max_scores, color="tab:green", alpha=0.3, linestyle="-", linewidth=1, label="Max Score (fenêtre)")
+            ax4 = ax1.twinx()
+            ax4.spines["right"].set_position(("axes", 1.08)) # Décalage vers la droite pour ne pas chevaucher
+            ax4.set_ylabel("Max Score (fenêtre)", color="tab:green", rotation=270, labelpad=15, fontsize=8, fontweight="bold")
+            ax4.plot(max_scores, color="tab:green", alpha=0.3, linestyle="-", linewidth=1, label="Max Score (fenêtre)")
+            ax4.tick_params(axis='y', labelcolor="tab:green")
+            ax4.legend(loc="lower right", fontsize=8)
         
         ax2.legend(loc="upper right", fontsize=8)
         
@@ -371,13 +379,15 @@ class InvadersApp:
     """Classe principale orchestrant l'entraînement."""
     
     def __init__(self):
+        print(f"🐍 Python exécutable : {sys.executable}")
         self.debug = 0
         self.debug_lua = True
         self.flag_F8_pressed = False
-        self.flag_F11_pressed = False
         self.flag_quit = False
         self.flag_create_fig = False
-        self.vitesse_de_jeu = 50
+        self.is_normal_speed = False
+        self.training_speed = 50.0
+        self.slow_speed = 1.0
         
         # Serveur Web
         self.web_server = GraphWebServer(graph_dir=".\\", host="0.0.0.0", port=5000, auto_display_latest=True)
@@ -386,7 +396,194 @@ class InvadersApp:
         # Audio
         pygame.mixer.init()
 
-    def launch_mame(self, desactiver_video_son=False):
+    def generate_best_gif(self, video_path, score):
+        """Génère un GIF léger et recadré de la meilleure partie."""
+        vfx = None
+        VideoFileClip = None
+        
+        try:
+            # Stratégie d'importation robuste (v1 vs v2)
+            try:
+                # Essai 1: MoviePy v1 (Ancien Standard)
+                from moviepy.editor import VideoFileClip
+                import moviepy.video.fx.all as vfx
+            except ImportError:
+                # Essai 2: MoviePy v2 (Nouveau Standard)
+                from moviepy import VideoFileClip
+                try:
+                    import moviepy.video.fx.all as vfx
+                except ImportError:
+                    # v2 structure alternative
+                    import moviepy.video.fx as vfx
+        except ImportError as e:
+            # On n'affiche le warning qu'une fois pour ne pas spammer
+            if not hasattr(self, 'moviepy_warning_shown'):
+                print(f"{Fore.YELLOW}⚠️ Pour générer des GIFs, installez moviepy : pip install moviepy")
+                print(f"   Erreur : {e}{Style.RESET_ALL}")
+                self.moviepy_warning_shown = True
+            return
+
+        gif_path = f"invaders_best_game_{score}.gif"
+        mp4_path = f"invaders_best_game_{score}_crop.mp4"
+        clip = None
+        clip_cropped = None
+        clip_gif = None
+        clip_mp4 = None
+        try:
+            clip = VideoFileClip(video_path)
+            w, h = clip.size
+            
+            # --- CONFIGURATION DU RECADRAGE (CROP) ---
+            # Ajustez 'crop_margin' pour retirer les bandes noires à gauche et à droite
+            # OBS capture souvent en 1920x1080, mais si c'est la fenêtre native (448px), 553px est trop grand !
+            # On vérifie la largeur avant de cropper.
+            crop_margin = 0
+            if w > 1000: # Probablement 1920x1080
+                crop_margin = 553 
+            
+            clip_cropped = clip
+            if crop_margin > 0 and w > 2 * crop_margin:
+                if hasattr(clip, 'crop'):
+                    clip_cropped = clip.crop(x1=crop_margin, width=w - 2*crop_margin)
+                elif hasattr(clip, 'cropped'): # MoviePy v2
+                    clip_cropped = clip.cropped(x1=crop_margin, width=w - 2*crop_margin)
+                elif vfx and hasattr(vfx, 'crop'):
+                    clip_cropped = vfx.crop(clip, x1=crop_margin, width=w - 2*crop_margin)
+                print(f"✂️ Crop appliqué (Marge {crop_margin}px)")
+            elif crop_margin > 0:
+                print(f"{Fore.YELLOW}⚠️ Crop annulé : Largeur vidéo ({w}) trop petite pour marge {crop_margin}.{Style.RESET_ALL}")
+
+            # --- 1. Génération GIF (Léger, 10fps, Hauteur 256) ---
+            target_height_gif = 256
+            clip_gif = clip_cropped
+            if hasattr(clip_gif, 'resize'):
+                clip_gif = clip_gif.resize(height=target_height_gif)
+            elif hasattr(clip_gif, 'resized'): # MoviePy v2
+                clip_gif = clip_gif.resized(height=target_height_gif)
+            elif vfx and hasattr(vfx, 'resize'):
+                clip_gif = vfx.resize(clip_gif, height=target_height_gif)
+            
+            clip_gif.write_gif(gif_path, fps=10, logger=None)
+            print(f"{Fore.GREEN}🎞️ GIF créé : {gif_path}{Style.RESET_ALL}")
+            
+            # --- 2. Génération MP4 Crop (Qualité, Original FPS, 256x320) ---
+            target_res_mp4 = (256, 320) # (Largeur, Hauteur)
+            clip_mp4 = clip_cropped
+            
+            # --- NOUVELLE APPROCHE ROBUSTE ---
+            # 1. Calculer la largeur cible en conservant le ratio, basé sur une hauteur de 320
+            source_w, source_h = clip_cropped.size
+            target_h = 320
+            # Calculer la largeur proportionnelle
+            calculated_w = int(target_h * (source_w / source_h))
+            # Arrondir à l'entier pair le plus proche pour la compatibilité H.264
+            final_w = round(calculated_w / 2) * 2
+
+            final_res = (final_w, target_h)
+            print(f"📉 Redimensionnement MP4 demandé : {target_res_mp4} -> Calculé pour ratio+compatibilité : {final_res}")
+
+            if hasattr(clip_mp4, 'resized'): # MoviePy v2
+                try:
+                    clip_mp4 = clip_mp4.resized(final_res) # Argument positionnel souvent plus fiable
+                except TypeError:
+                    try:
+                        clip_mp4 = clip_mp4.resized(size=final_res)
+                    except TypeError:
+                        clip_mp4 = clip_mp4.resized(width=final_res[0], height=final_res[1])
+            elif hasattr(clip_mp4, 'resize'): # MoviePy v1
+                clip_mp4 = clip_mp4.resize(newsize=final_res)
+            elif vfx and hasattr(vfx, 'resize'):
+                clip_mp4 = vfx.resize(clip_mp4, newsize=final_res)
+
+            # ULTIMATE SAFETY CHECK: Dimensions paires requises pour libx264
+            # Si le resize a échoué à forcer les dimensions paires (ex: ratio préservé), on croppe 1 pixel.
+            w_check, h_check = clip_mp4.size
+            if w_check % 2 != 0 or h_check % 2 != 0:
+                new_w = w_check - 1 if w_check % 2 != 0 else w_check
+                new_h = h_check - 1 if h_check % 2 != 0 else h_check
+                print(f"⚠️ Dimensions impaires persistantes ({w_check}x{h_check}). Crop final vers {new_w}x{new_h}...")
+                
+                if hasattr(clip_mp4, 'cropped'): # MoviePy v2
+                    clip_mp4 = clip_mp4.cropped(x1=0, y1=0, width=new_w, height=new_h)
+                elif hasattr(clip_mp4, 'crop'): # MoviePy v1
+                    clip_mp4 = clip_mp4.crop(x1=0, y1=0, width=new_w, height=new_h)
+                elif vfx and hasattr(vfx, 'crop'):
+                    clip_mp4 = vfx.crop(clip_mp4, x1=0, y1=0, width=new_w, height=new_h)
+
+            # Utilisation du FPS original pour garder toutes les images
+            original_fps = clip.fps if clip.fps else 30
+            clip_mp4.write_videofile(mp4_path, fps=original_fps, codec='libx264', ffmpeg_params=['-pix_fmt', 'yuv420p'], logger=None)
+            print(f"{Fore.GREEN}🎥 MP4 recadré créé : {mp4_path} ({original_fps} fps){Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Erreur création GIF/AVI : {e}{Style.RESET_ALL}")
+        finally:
+            # Nettoyage des clips
+            for c in [clip_gif, clip_mp4, clip_cropped, clip]:
+                if c:
+                    try: c.close()
+                    except: pass
+                    
+    def log_results(self, nb_episodes, mean_scores, config, nb_mess, nb_step_frame, r_kill, r_step):
+        filename = "d:\\Emulateurs\\Mame Officiel\\plugins\\resultats_invaders.txt"
+        
+        # Trouver le prochain index
+        last_idx = 0
+        if os.path.exists(filename):
+            try:
+                with open(filename, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip() and line[0].isdigit():
+                            parts = line.split('[')
+                            if parts and parts[0].strip().isdigit():
+                                idx = int(parts[0])
+                                if idx > last_idx: last_idx = idx
+            except Exception as e:
+                print(f"Erreur lecture resultats: {e}")
+        next_idx = last_idx + 1
+
+        # Stats
+        start_mean = mean_scores[0] if mean_scores else 0
+        end_mean = mean_scores[-1] if mean_scores else 0
+        max_mean = max(mean_scores) if mean_scores else 0
+        
+        # Formatage
+        input_str = str(config.input_size)
+        hidden_str = f"{config.hidden_size}*{config.hidden_layers}"
+        
+        param_line1 = (f"{next_idx}[input={input_str}][hidden={hidden_str}][output={config.output_size}]"
+                       f"[gamma={config.gamma}][learning={config.learning_rate}]"
+                       f"[reward_kill={r_kill}][reward_step={r_step}]")
+        
+        decay_val = config.epsilon_linear if config.epsilon_linear > 0 else config.epsilon_decay
+        decay_type = "linear" if config.epsilon_linear > 0 else "decay"
+        
+        param_line2 = (f"[epsilon start={config.epsilon_start} end={config.epsilon_end} {decay_type}={decay_val}]"
+                       f"[Replay_size={config.buffer_capacity}&_batch={config.batch_size}]"
+                       f"[nb_mess_frame={nb_mess}][nb_step_frame={nb_step_frame}][speed={self.training_speed}]")
+        
+        comment = (f"=> {nb_episodes} parties. Score moyen: début={start_mean:.2f}, fin={end_mean:.2f}, max={max_mean:.2f}. "
+                   f"Model: {config.model_type}, Noisy: {config.use_noisy}, Double: {config.double_dqn}, Dueling: {config.dueling}, PER: {config.prioritized_replay}")
+
+        try:
+            with open(filename, "a", encoding="utf-8") as f:
+                f.write(f"\n\n{param_line1}\n{param_line2}\n{comment}")
+            print(f"{Fore.CYAN}📝 Résultats sauvegardés dans {filename}{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}❌ Erreur écriture resultats: {e}{Style.RESET_ALL}")
+
+    def launch_obs(self):
+        """Tente de lancer OBS Studio si non détecté."""
+        obs_path = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+        if os.path.exists(obs_path):
+            try:
+                print(f"{Fore.YELLOW}🚀 Lancement d'OBS Studio...{Style.RESET_ALL}")
+                subprocess.Popen([obs_path], cwd=os.path.dirname(obs_path))
+                time.sleep(8) # Temps de démarrage
+            except Exception as e:
+                print(f"{Fore.RED}Erreur lancement OBS: {e}{Style.RESET_ALL}")
+
+    def launch_mame(self, desactiver_video_son=False, visible=False):
         """Lance le processus MAME."""
         command = [
             "D:\\Emulateurs\\Mame Officiel\\mame.exe",
@@ -405,12 +602,12 @@ class InvadersApp:
             
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 7 # Minimisé
+        startupinfo.wShowWindow = 1 if visible else 7 # 1=Visible, 7=Minimisé
         
         self.process = subprocess.Popen(command, cwd="D:\\Emulateurs\\Mame Officiel", startupinfo=startupinfo, stderr=subprocess.DEVNULL)
         time.sleep(15) # Attente init MAME
 
-    def setup_keyboard(self, trainer, config):
+    def setup_keyboard(self, trainer, config, comm):
         """Configure les raccourcis clavier."""
         def on_key_press(event):
             def is_terminal_in_focus():
@@ -430,11 +627,15 @@ class InvadersApp:
                         self.debug += int(self.debug < 3)
                         print(f"\n[F4] Debug = {self.debug}")
                     elif keyboard.is_pressed("f5"):
-                        trainer.epsilon += 0.01
-                        print(f"\n[F5] Epsilon + : {trainer.epsilon:.3f}")
+                        self.is_normal_speed = not self.is_normal_speed
+                        new_speed = self.slow_speed if self.is_normal_speed else self.training_speed
+                        comm.communicate([f"execute throttle_rate({new_speed})"])
+                        print(f"\n[F5] Vitesse : {'Low (' + str(self.slow_speed) + ')' if self.is_normal_speed else f'Rapide ({self.training_speed})'}")
                     elif keyboard.is_pressed("f6"):
-                        trainer.epsilon -= 0.01
-                        print(f"\n[F6] Epsilon - : {trainer.epsilon:.3f}")
+                        self.slow_speed = round(self.slow_speed + 0.1, 1)
+                        print(f"\n[F6] Vitesse lente ajustée : {self.slow_speed}")
+                        if self.is_normal_speed:
+                            comm.communicate([f"execute throttle_rate({self.slow_speed})"])
                     elif keyboard.is_pressed("f7") and not self.flag_create_fig:
                         print("\n[F7] Création figure demandée.")
                         self.flag_create_fig = True
@@ -446,9 +647,16 @@ class InvadersApp:
                         print(f"\n[F9] Mode changé vers : {new_mode}")
                         config.mode = new_mode
                         trainer.set_mode(new_mode)
+                    elif keyboard.is_pressed("f10"):
+                        trainer.epsilon = min(1.0, trainer.epsilon + 0.1)
+                        print(f"\n[F10] Epsilon augmenté : {trainer.epsilon:.3f}")
                     elif keyboard.is_pressed("f11"):
-                        self.flag_F11_pressed = True
-                        print("\n[F11] Toggle Debug Lua demandé.")
+                        trainer.epsilon = max(config.epsilon_end, trainer.epsilon - 0.1)
+                        print(f"\n[F11] Epsilon diminué : {trainer.epsilon:.3f}")
+                    elif keyboard.is_pressed("f12"):
+                        self.debug_lua = not self.debug_lua
+                        comm.communicate([f"debug {'on' if self.debug_lua else 'off'}"])
+                        print(f"\n[F12] Debug Lua : {'ON' if self.debug_lua else 'OFF'}")
 
         keyboard.on_press(on_key_press)
 
@@ -469,22 +677,22 @@ class InvadersApp:
         
         if model_type.lower() == "cnn":
             cnn_type = "precise"
-            full_frame_2D = (192, 176)
+            full_frame_2D = (192, 200) # Taille ajustée pour voir la soucoupe sans le score (192x200)
             factor_div_frame = 2
             input_size = (N,) + tuple(x // factor_div_frame for x in full_frame_2D)
-            NB_DE_DEMANDES_PAR_STEP = str(2 + 3 + 4) # 2(state: img+aliens) + 3(action) + 4(score/status)
+            NB_DE_DEMANDES_PAR_STEP = str(2 + 3 + 5) # 2(state: img+aliens) + 3(action) + 5(score/status/lives)
             TRAIN_EVERY_N_GLOBAL_STEPS = 4 # Optimisation vitesse : on entraîne moins souvent (tous les 4 steps)
         elif model_type.lower() == "mlp":
             flag_aliens = True
             flag_boucliers = False
             input_size = 11 + 2 + (6 + 11) * flag_aliens + 4 * flag_boucliers + 2
-            NB_DE_DEMANDES_PAR_STEP = str((11 + 2 + 2) + flag_aliens + 3 + 2 + 2) # 15(state)+1(aliens)+3(action)+4(score/status) = 23
+            NB_DE_DEMANDES_PAR_STEP = str((11 + 2 + 2) + flag_aliens + 3 + 2 + 3) # 15(state)+1(aliens)+3(action)+5(score/status/lives) = 24
             TRAIN_EVERY_N_GLOBAL_STEPS = 4
         elif model_type.lower() == "dreamer":
             factor_div_frame = 2
             full_frame_2D = (96, 176)
             input_size = (N,) + full_frame_2D
-            NB_DE_DEMANDES_PAR_STEP = str(2 + 3 + 4) # 2(state: img+aliens) + 3(action) + 4(score/status)
+            NB_DE_DEMANDES_PAR_STEP = str(2 + 3 + 5) # 2(state: img+aliens) + 3(action) + 5(score/status/lives)
             TRAIN_EVERY_N_GLOBAL_STEPS = 10
         else:
             raise ValueError(f"Modèle {model_type} non supporté.")
@@ -496,6 +704,7 @@ class InvadersApp:
         reward_alive = 0.0              # Réduit drastiquement pour éviter le camping passif.
         reward_mult_step = -0.01        # Légère pression temporelle (comme Pacman)
         mult_reward_state = 0.0          # DÉSACTIVÉ (Cause de l'explosion des rewards et instabilité)
+        mult_reward_state = 0.05         # RÉACTIVÉ (Léger) : Force l'IA à nettoyer vite avant que ça descende.
         reward_end_of_game = -100.0      # Game Over inacceptable (-10 -> -100)
         reward_fire_penalty = 0.0        # DÉSACTIVÉ (Laisser tirer à volonté pour débloquer l'agressivité)
         
@@ -525,7 +734,7 @@ class InvadersApp:
             epsilon_linear=epsilon_linear,
             epsilon_decay=epsilon_decay,
             epsilon_add=epsilon_add,
-            buffer_capacity=200_000, # Réduit à ~13 Go pour éviter de saturer la RAM/Disque
+            buffer_capacity=150_000, # Réduit à 150k pour compenser la taille d'image (+18%) et éviter le swap
             batch_size=64,
             min_history_size=20000,  # Démarrage plus rapide (comme Pacman)
             prioritized_replay=True,
@@ -541,7 +750,21 @@ class InvadersApp:
         )
 
         # 2. Initialisation Système
-        self.launch_mame()
+        # Gestion OBS (Avant MAME pour décider de la visibilité)
+        record = True
+        recorder = None
+        if record:
+            recorder = ScreenRecorder()
+            if not recorder.ws:
+                print(f"{Fore.YELLOW}⚠️ OBS non détecté. Tentative de lancement...{Style.RESET_ALL}")
+                self.launch_obs()
+                recorder = ScreenRecorder()
+                if not recorder.ws:
+                    print(f"{Fore.RED}❌ Echec connexion OBS. Enregistrement DÉSACTIVÉ.{Style.RESET_ALL}")
+                    record = False
+                    recorder = None
+
+        self.launch_mame(visible=record)
         comm = MameCommunicator("localhost", 12345)
         game = InvadersInterface(comm)
         
@@ -582,12 +805,8 @@ class InvadersApp:
         if RESUME and os.path.exists(buffer_filename):
             trainer.load_buffer(buffer_filename)
 
-        self.setup_keyboard(trainer, config)
+        self.setup_keyboard(trainer, config, comm)
         
-        # Recorder
-        record = False
-        recorder = ScreenRecorder() if record else None
-
         # Stats containers
         fenetre_moyenne = 100
         collection_score = deque(maxlen=fenetre_moyenne)
@@ -602,7 +821,7 @@ class InvadersApp:
         comm.communicate([
             f"write_memory {Memory.NUM_COINS}(1)",
             "execute P1_start(1)",
-            f"execute throttle_rate({self.vitesse_de_jeu})",
+            f"execute throttle_rate({self.training_speed})",
             "execute throttled(0)",
             f"frame_per_step {NB_DE_FRAMES_STEP}",
         ])
@@ -664,15 +883,14 @@ class InvadersApp:
                 time.sleep(0.01)
             
             start_steps_time = time.time()
-            nb_vies = 3
             
             current_loop_obs_stack = initial_obs_stack
             invaders_loop_frame_history = deque(maxlen=config.state_history_size)
             for f in initial_obs_stack: invaders_loop_frame_history.append(f)
 
+            comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
             # --- Boucle de jeu (Step) ---
             while NotEndOfGame == 1:
-                comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
                 # 1. Action
                 if config.model_type.lower() == "dreamer":
                     action = trainer.dreamer_step(current_loop_obs_stack, prev_action_value)
@@ -689,7 +907,7 @@ class InvadersApp:
                 # 3. Observation & Score
                 next_frame, reward_state_comp = config.state_extractor()
                 _last_score = score
-                score, PlayerIsOK, NotEndOfGame = game.get_score_and_status(_last_score)
+                score, PlayerIsOK, NotEndOfGame, lives = game.get_score_and_status(_last_score)
 
                 # 4. Reward
                 if NotEndOfGame == 0:
@@ -701,7 +919,7 @@ class InvadersApp:
                 elif PlayerIsOK == 1:
                     reward = reward_alive
                     done = False
-                elif nb_vies > 1:
+                elif lives > 0: # Si on a encore des vies en réserve (mémoire 21FF)
                     reward = reward_kill
                     done = False
                 else:
@@ -775,11 +993,6 @@ class InvadersApp:
                 comm.number_of_messages = 0
                 
                 # Gestion Touches
-                if self.flag_F11_pressed:
-                    self.debug_lua = not self.debug_lua
-                    comm.communicate([f"debug {'on' if self.debug_lua else 'off'}"])
-                    self.flag_F11_pressed = False
-                
                 if self.flag_F8_pressed:
                     if config.model_type == "mlp":
                         Visualizer.afficher_get_state(game)
@@ -789,24 +1002,79 @@ class InvadersApp:
 
                 # 8. Mort / Fin vie
                 if PlayerIsOK == 0:
-                    comm.communicate(["wait_for 4"])  # 4 = nb de messages dans get_score_and_status
+                    comm.communicate(["wait_for 5"])  # 5 = nb de messages dans get_score_and_status
                     while PlayerIsOK == 0 and NotEndOfGame == 1:
-                        _, PlayerIsOK, NotEndOfGame = game.get_score_and_status(score)
+                        score, PlayerIsOK, NotEndOfGame, lives = game.get_score_and_status(score)
                     if PlayerIsOK == 1:
-                        nb_vies -= 1
+                        comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
                     if NotEndOfGame == 0 and config.model_type.lower() == "dreamer":
                         trainer.store_transition(current_loop_obs_stack, action, reward, next_obs_stack, True)
 
             # --- Fin Episode ---
-            comm.communicate(["wait_for 1"])
+            comm.communicate(["wait_for 0"])
             #comm.communicate([f'draw_text(25,1,"Game number: {episode+1:04d} - mean score={mean_score:04.0f} - ba(c)o 2026")'])
             if record:
-                recorder.stop_recording()
                 if score > last_score:
-                    if last_score != 0 and os.path.exists(f"best_game_{last_score}.avi"):
-                        os.remove(f"best_game_{last_score}.avi")
-                    shutil.copy("output-obs.mp4", f"best_game_{score}.avi")
-                    last_score = score
+                    time.sleep(2.0) # Attente pour capturer la fin de partie uniquement si record
+                video_path = recorder.stop_recording()
+
+                if video_path and os.path.exists(video_path):
+                    if score > last_score:
+                        # Supprimer l'ancienne meilleure vidéo si elle existe
+                        if last_score != 0 and os.path.exists(f"invaders_best_game_{last_score}.mp4"):
+                            try:
+                                os.remove(f"invaders_best_game_{last_score}.mp4")
+                            except OSError as e:
+                                print(f"Erreur suppression ancienne vidéo : {e}")
+                        
+                        # Supprimer l'ancien meilleur GIF et AVI crop si ils existent
+                        if last_score != 0:
+                            if os.path.exists(f"invaders_best_game_{last_score}.gif"):
+                                try:
+                                    os.remove(f"invaders_best_game_{last_score}.gif")
+                                except OSError as e:
+                                    print(f"Erreur suppression ancien GIF : {e}")
+                            if os.path.exists(f"invaders_best_game_{last_score}_crop.mp4"):
+                                try:
+                                    os.remove(f"invaders_best_game_{last_score}_crop.mp4")
+                                except OSError as e:
+                                    print(f"Erreur suppression ancien MP4 crop : {e}")
+
+                        # Copier la nouvelle meilleure vidéo
+                        try:
+                            shutil.copy(video_path, f"invaders_best_game_{score}.mp4")
+                            print(f"📼 Nouvelle meilleure partie enregistrée : invaders_best_game_{score}.mp4")
+                            
+                            # Génération du GIF
+                            self.generate_best_gif(video_path, score)
+                            
+                            # Tentative de suppression du fichier original avec re-essais
+                            deleted = False
+                            for attempt in range(5): # 5 tentatives
+                                try:
+                                    os.remove(video_path)
+                                    deleted = True
+                                    break
+                                except PermissionError:
+                                    print(f"  (Tentative {attempt+1}/5) Fichier vidéo verrouillé par OBS, attente...")
+                                    time.sleep(0.5) # Attendre 500ms
+                                except Exception as e:
+                                    print(f"Erreur inattendue lors de la suppression de {video_path}: {e}")
+                                    break # Sortir en cas d'autre erreur
+                            if not deleted:
+                                print(f"{Fore.YELLOW}⚠️ Impossible de supprimer le fichier vidéo original {video_path}. Il est peut-être encore utilisé.{Style.RESET_ALL}")
+                        except (shutil.Error, OSError) as e:
+                            print(f"Erreur copie/suppression vidéo : {e}")
+
+                        last_score = score
+                    else:
+                        # Suppression de la vidéo si ce n'est pas un record pour économiser l'espace
+                        try:
+                            os.remove(video_path)
+                        except Exception as e:
+                            print(f"⚠️ Erreur suppression vidéo non-record : {e}")
+                elif video_path: # Le chemin a été retourné mais le fichier n'existe pas
+                    print(f"{Fore.YELLOW}⚠️ OBS a retourné un chemin ({video_path}) mais le fichier est introuvable.{Style.RESET_ALL}")
 
             # Stats & Graphiques
             if self.flag_create_fig:
@@ -889,6 +1157,9 @@ class InvadersApp:
         trainer.save_model(f"./invaders_{final_tag}.pth")
         trainer.save_buffer("./invaders.buffer")
         
+        if episode >= 1000:
+            self.log_results(episode, list_mean_scores, config, NB_DE_DEMANDES_PAR_STEP, NB_DE_FRAMES_STEP, reward_kill, reward_mult_step)
+
         if record:
             recorder.stop_recording()
             recorder.ws.disconnect()

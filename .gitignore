@@ -67,7 +67,7 @@ socket\ \[à\ mettre\ au\ niveau\ de\ mame\]/*
 /models-png-pacman
 /test*.*
 !/test_neurones.py
-/*.pth
+/*.pth*
 /*.png
 invaders.txt
 invaders.buffer
@@ -82,3 +82,4 @@ invaders_cnn_DDQN__Dueling_Prioritized_nstep_N=33_i=(3, 96, 88)_o=6_hl=1,512_bat
 invadersDV2.buffer
 Space Invaders Robot Gemini 2.5 Pro.py
 pacman.buffer
+install_moviepy.py

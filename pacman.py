@@ -464,6 +464,7 @@ class Visualizer:
 class PacmanApp:
     def __init__(self):
         self.debug = 0
+        self.debug_lua = True
         self.flag_quit = False
         self.flag_create_fig = False
         self.flag_F8_pressed = False
@@ -525,7 +526,18 @@ class PacmanApp:
         except Exception as e:
             print(f"{Fore.RED}❌ Erreur écriture resultats: {e}{Style.RESET_ALL}")
 
-    def launch_mame(self):
+    def launch_obs(self):
+        """Tente de lancer OBS Studio si non détecté."""
+        obs_path = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+        if os.path.exists(obs_path):
+            try:
+                print(f"{Fore.YELLOW}🚀 Lancement d'OBS Studio...{Style.RESET_ALL}")
+                subprocess.Popen([obs_path], cwd=os.path.dirname(obs_path))
+                time.sleep(8)
+            except Exception as e:
+                print(f"{Fore.RED}Erreur lancement OBS: {e}{Style.RESET_ALL}")
+
+    def launch_mame(self, visible=False):
         command = [
             "D:\\Emulateurs\\Mame Officiel\\mame.exe",
             "-window", "-resolution", "448x576",
@@ -541,7 +553,7 @@ class PacmanApp:
         # Utilisation de startupinfo pour minimiser la fenêtre console si besoin
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 7 # Minimisé
+        startupinfo.wShowWindow = 1 if visible else 7 # 1=Visible, 7=Minimisé
         
         self.process = subprocess.Popen(command, cwd="D:\\Emulateurs\\Mame Officiel", startupinfo=startupinfo, stderr=subprocess.DEVNULL)
         time.sleep(10)
@@ -591,6 +603,10 @@ class PacmanApp:
                         print(f"\n[F9] Mode changé vers : {new_mode}")
                         config.mode = new_mode
                         trainer.set_mode(new_mode)
+                    elif keyboard.is_pressed("f12"):
+                        self.debug_lua = not self.debug_lua
+                        comm.communicate([f"debug {'on' if self.debug_lua else 'off'}"])
+                        print(f"\n[F12] Debug Lua : {'ON' if self.debug_lua else 'OFF'}")
 
         keyboard.on_press(on_key_press)
 
@@ -657,17 +673,28 @@ class PacmanApp:
         )
 
         print(f"Configuration Input Size: {input_size} (Model: {model_type})")
-        self.launch_mame()
+        
+        # Recorder & OBS
+        record = False # Mettre à True pour enregistrer avec OBS
+        recorder = None
+        if record:
+            recorder = ScreenRecorder()
+            if not recorder.ws:
+                print(f"{Fore.YELLOW}⚠️ OBS non détecté. Tentative de lancement...{Style.RESET_ALL}")
+                self.launch_obs()
+                recorder = ScreenRecorder()
+                if not recorder.ws:
+                    print(f"{Fore.RED}❌ Echec connexion OBS. Enregistrement DÉSACTIVÉ.{Style.RESET_ALL}")
+                    record = False
+                    recorder = None
+
+        self.launch_mame(visible=record)
         comm = MameCommunicator("localhost", 12346) # Port défini dans Lua pour Pacman
         game = PacmanInterface(comm)
         config.state_extractor = StateExtractor(game, model_type)
         
         trainer = DQNTrainer(config)
         self.setup_keyboard(trainer, config, comm)
-        
-        # Recorder
-        record = False # Mettre à True pour enregistrer avec OBS
-        recorder = ScreenRecorder() if record else None
         
         # Load if exists
         if RESUME:
@@ -840,12 +867,51 @@ class PacmanApp:
                             break
 
             if record:
-                recorder.stop_recording()
                 if score > last_score:
-                    if last_score != 0 and os.path.exists(f"best_game_{last_score}.avi"):
-                        os.remove(f"best_game_{last_score}.avi")
-                    shutil.copy("output-obs.mp4", f"best_game_{score}.avi")
-                    last_score = score
+                    time.sleep(2.0) # Attente pour capturer la fin de partie uniquement si record
+                video_path = recorder.stop_recording()
+
+                if video_path and os.path.exists(video_path):
+                    if score > last_score:
+                        # Supprimer l'ancienne meilleure vidéo si elle existe
+                        if last_score != 0 and os.path.exists(f"best_game_{last_score}.mp4"):
+                            try:
+                                os.remove(f"best_game_{last_score}.mp4")
+                            except OSError as e:
+                                print(f"Erreur suppression ancienne vidéo : {e}")
+                        
+                        # Copier la nouvelle meilleure vidéo
+                        try:
+                            shutil.copy(video_path, f"best_game_{score}.mp4")
+                            print(f"📼 Nouvelle meilleure partie enregistrée : best_game_{score}.mp4")
+                            
+                            # Tentative de suppression du fichier original avec re-essais
+                            deleted = False
+                            for attempt in range(5): # 5 tentatives
+                                try:
+                                    os.remove(video_path)
+                                    deleted = True
+                                    break
+                                except PermissionError:
+                                    print(f"  (Tentative {attempt+1}/5) Fichier vidéo verrouillé par OBS, attente...")
+                                    time.sleep(0.5) # Attendre 500ms
+                                except Exception as e:
+                                    print(f"Erreur inattendue lors de la suppression de {video_path}: {e}")
+                                    break # Sortir en cas d'autre erreur
+                            if not deleted:
+                                print(f"{Fore.YELLOW}⚠️ Impossible de supprimer le fichier vidéo original {video_path}. Il est peut-être encore utilisé.{Style.RESET_ALL}")
+                        except (shutil.Error, OSError) as e:
+                            print(f"Erreur copie/suppression vidéo : {e}")
+
+                        last_score = score
+                    else:
+                        # Suppression de la vidéo si ce n'est pas un record
+                        try:
+                            os.remove(video_path)
+                        except Exception as e:
+                            print(f"⚠️ Erreur suppression vidéo non-record : {e}")
+                elif video_path: # Le chemin a été retourné mais le fichier n'existe pas
+                    print(f"{Fore.YELLOW}⚠️ OBS a retourné un chemin ({video_path}) mais le fichier est introuvable.{Style.RESET_ALL}")
 
             # End Episode
             scores.append(score)

@@ -1,34 +1,83 @@
 -------------------------------------------------------------------------------------
-COMPILATION DE LUASOCKET pour obtenir core.dll version compatible avec LUA 5.4
-indispensable pour communiquer avec MAME depuis l'extérieur via les sockets 
-(utile avec un prog Python par exemple et l'utilisation la librairie AI torch)
+=====================================================================================
+   GUIDE DE COMPILATION DE LUASOCKET POUR MAME (WINDOWS)
+=====================================================================================
+
+Ce document explique comment obtenir une version de LuaSocket compatible avec MAME.
+Cette étape est INDISPENSABLE pour permettre à MAME de communiquer avec des scripts
+externes (comme nos agents IA en Python) via TCP/IP.
+
+1. POURQUOI RECOMPILER ?
 -------------------------------------------------------------------------------------
+MAME intègre son propre interpréteur Lua (actuellement version 5.4).
+Les binaires de LuaSocket ("core.dll") que l'on trouve sur Internet sont généralement
+compilés pour Lua 5.1 (utilisé par LuaJIT) ou Lua 5.3.
 
-Compiler LUA pour obtenir la lib static de lua indispensable pour compiler luasocket:
+Si vous utilisez une version incompatible, MAME affichera une erreur au chargement :
+   "error loading module 'socket.core' from file '...': The specified module could not be found."
+   (Ce message cryptique signifie souvent une incompatibilité d'ABI Lua).
+
+Il faut donc compiler LuaSocket spécifiquement contre les headers et la lib de Lua 5.4.
+
+
+2. PRÉ-REQUIS
 -------------------------------------------------------------------------------------
-(inspiration https://blog.spreendigital.de/2020/05/21/how-to-compile-lua-5-4-0-for-windows/)
-
--télécharger lua5.4.4  https://www.lua.org/ftp/
--lancer l'invite x86/x64 de visualstudio (dans le menu demarrer de windows => dossier visual studio)
--Aller dans src de lua et taper la commande de compilation: cl /MD /O2 /c /DLUA_BUILD_AS_DLL *.c
--Renomer le fichier luac.obj en luac.o ou autre pour ne pas l'utiliser dans la lib (luac est pour les versions compilés des fichiers scripts lua)
--Créer la librairie : lib /OUT:lua54.lib *.obj (attention si warning lib possible de luac [version des scripts compilés, pas bon] et pas lua !...)
+1. Visual Studio (Community 2019 ou 2022) avec le module "Desktop development with C++".
+2. Les sources de Lua 5.4.x (https://www.lua.org/ftp/).
+3. Les sources de LuaSocket (https://github.com/lunarmodules/luasocket).
 
 
-Compiler luasocket pour obtenir core.dll:
------------------------------------------
-Mettre dans les proprietes de socket le chemin sur src pour les entete de lua 5.4.4 et sur la bibliotheque lua54.lib de la compilation de lua [chemin précédent src de lua 5.4.4]
-Modifier le fichier lua.props pour indiquer la bonne version de lua.lib version 54
-Regénérer le projet socket
-Placer dans le dossier où se trouve MAME le dossier socket qui vient d'étre créer dans X64
-Placer dans le dossier plugins de MAME le fichier socket.lua (qui appelle "socket.core", donc core.dll) [ce fichier se trouve dans les src de luasocket]
+3. ÉTAPE 1 : CRÉER LA LIBRAIRIE STATIQUE LUA 5.4
+-------------------------------------------------------------------------------------
+LuaSocket a besoin de se lier ("link") à lua54.lib pour fonctionner.
+
+1. Téléchargez et extrayez les sources de Lua 5.4.
+2. Ouvrez l'invite de commande Visual Studio :
+   "x64 Native Tools Command Prompt for VS 20xx" (Menu Démarrer -> Visual Studio).
+3. Allez dans le dossier `src` de Lua :
+   cd C:\Chemin\Vers\lua-5.4.x\src
+4. Compilez les fichiers objets :
+   cl /MD /O2 /c /DLUA_BUILD_AS_DLL *.c
+5. Supprimez les fichiers objets des exécutables (lua.exe et luac.exe) pour ne pas polluer la lib :
+   del lua.obj luac.obj
+6. Créez la librairie statique :
+   lib /OUT:lua54.lib *.obj
+
+=> Vous obtenez un fichier `lua54.lib`. Gardez-le précieusement.
 
 
-Test:
-Aller dans le dossier de MAME lancer mame.exe -console et tapez:
-[MAME]> socket=require"socket"
-[MAME]> print(socket._VERSION)
-LuaSocket 3.0.0
-[MAME]>
-(bizarrement il annonce la version 3.0.0.. "va comprendre charles")
- 
+4. ÉTAPE 2 : COMPILER LUASOCKET
+-------------------------------------------------------------------------------------
+1. Téléchargez et extrayez LuaSocket.
+2. Ouvrez le fichier solution `.sln` dans Visual Studio (souvent dans un dossier `vs` ou à la racine).
+3. Dans l'explorateur de solutions, faites Clic-Droit sur le projet "socket" -> Propriétés.
+4. Configurez les chemins (Assurez-vous d'être en configuration Release / x64) :
+   - C/C++ -> Général -> Autres répertoires include :
+     Ajoutez le chemin vers le dossier `src` de Lua 5.4 (là où sont lua.h, lauxlib.h...).
+   - Éditeur de liens -> Général -> Répertoires de bibliothèques supplémentaires :
+     Ajoutez le chemin vers le dossier contenant votre `lua54.lib`.
+   - Éditeur de liens -> Entrée -> Dépendances supplémentaires :
+     Ajoutez `lua54.lib` à la liste.
+5. Compilez la solution (Build Solution).
+
+=> Vous obtenez un fichier `core.dll` (parfois dans un sous-dossier x64/Release).
+
+
+5. INSTALLATION DANS MAME
+-------------------------------------------------------------------------------------
+Pour que le script `require("socket")` fonctionne, MAME doit trouver les fichiers ainsi :
+
+Dossier MAME/plugins/ :
+  |-- socket.lua          <-- Copié depuis luasocket/src/socket.lua
+  |-- socket/             <-- Dossier à créer
+       |-- core.dll       <-- Votre DLL compilée (renommez-la si elle s'appelle socket.dll)
+
+
+6. TEST
+-------------------------------------------------------------------------------------
+Lancez MAME avec la console : `mame.exe -console`
+Tapez :
+   socket = require("socket")
+   print(socket._VERSION)
+
+Si cela affiche "LuaSocket 3.0.0" (ou plus), c'est réussi !
