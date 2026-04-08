@@ -1,0 +1,41 @@
+Ran command: `python .\safe_backup.py`
+
+Bravo, la sauvegarde est réussie (**28 fichiers stratégiques** sont maintenant à l'abri !). 🥂
+
+Pour recréer ton environnement Python (`venv`) dans le nouveau dossier `C:\Users\baco\Documents\Python\MameAI\`, voici la marche à suivre. C'est très simple grâce au fichier `requirements.txt` que nous avons copié dans le dossier `core`.
+
+### 🛠️ Procédure pour recréer l'environnement :
+
+1.  **Ouvre un terminal** (PowerShell ou CMD) dans ton nouveau dossier :
+    `cd C:\Users\baco\Documents\Python\MameAI`
+
+2.  **Crée l'environnement virtuel** :
+    `python -m venv venv`
+
+3.  **Active l'environnement** :
+    *   *Si tu es sur PowerShell :* `.\venv\Scripts\Activate.ps1`
+    *   *Si tu es sur CMD :* `.\venv\Scripts\activate.bat`
+
+4.  **Installe toutes les bibliothèques** (PyTorch, Pygame, Matplotlib, etc.) en une seule commande :
+    `pip install -r .\core\requirements.txt`
+
+---
+
+### 💡 Note importante sur PyTorch (CUDA)
+Comme tu utilises ta carte graphique (GPU) pour l'entraînement, le choix de la version de PyTorch est crucial selon ta génération de carte :
+
+*   **Pour les cartes standards (RTX 30xx, 40xx) :**
+    ```powershell
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+    ```
+
+*   **Pour les cartes de nouvelle génération RTX 50xx (Architecture Blackwell / sm_120) :**
+    Ces cartes nécessitent une version spécifique (Nightly) pour être reconnues correctement par PyTorch :
+    ```powershell
+    pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+    ```
+
+**Vérification :** Une fois installé, lance cette commande pour confirmer que le GPU est actif :
+`python -c "import torch; print(f'CUDA disponible: {torch.cuda.is_available()} | GPU: {torch.cuda.get_device_name(0)}')" `
+
+**Une fois cela fait, ton nouveau dossier sera un laboratoire d'IA totalement autonome et prêt pour l'action !** 🚀🖥️

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Buffer & Models (Large files)
+*.buffer
+*.pth
+*.pth.tar
+
+# Logs & Media
+**/logs/
+**/media/
+*.png
+*.mp4
+*.gif
+*.txt
+!lis-moi.txt
+# Sauf les résultats si on veut les garder, mais resultats_pacman.txt peut être gros.
+# On ignore les fichiers de résultats par défaut pour garder le repo propre.
+
+# IDE
+.vscode/
+.idea/
+.gemini/
