@@ -568,7 +568,7 @@ class PacmanApp:
         self.pending_commands = []
         
         # Web Server
-        self.web_server = GraphWebServer(graph_dir=".\\", host="0.0.0.0", port=5000, auto_display_latest=True)
+        self.web_server = GraphWebServer(graph_dir=MEDIA_DIR, host="0.0.0.0", port=5000, auto_display_latest=True)
         
         pygame.mixer.init()
 

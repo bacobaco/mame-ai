@@ -233,9 +233,13 @@ while True:
             output_path = os.path.join(MEDIA_DIR, "pacman_mean_graph.png")
             generate_plot(eps, means, sigmas_list, hiscores_list, global_steps_list, qs, start_dt, now_dt, output_path)
             
-            if len(eps) > 4000:
+            # Zoom : On se base sur les 4000 derniers numéros d'épisodes (indépendant de la fréquence du log)
+            target_ep = eps[-1]
+            zoom_indices = [i for i, ep in enumerate(eps) if ep >= target_ep - 4000]
+            if len(zoom_indices) > 1:
+                idx = zoom_indices[0]
                 output_path_zoom = os.path.join(MEDIA_DIR, "pacman_mean_graph_zoom.png")
-                generate_plot(eps[-4000:], means[-4000:], sigmas_list[-4000:], hiscores_list[-4000:], global_steps_list[-4000:], qs[-4000:], start_dt, now_dt, output_path_zoom, is_zoom=True)
+                generate_plot(eps[idx:], means[idx:], sigmas_list[idx:], hiscores_list[idx:], global_steps_list[idx:], qs[idx:], start_dt, now_dt, output_path_zoom, is_zoom=True)
             
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Dashboard PACMAN OK | {len(eps)} Lignes | Eps: {eps[-1]}")
 

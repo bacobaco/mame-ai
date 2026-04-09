@@ -466,7 +466,7 @@ class InvadersApp:
         self.pending_commands = [] # File d'attente pour les commandes thread-safe
         
         # Serveur Web
-        self.web_server = GraphWebServer(graph_dir=".\\", host="0.0.0.0", port=5000, auto_display_latest=True)
+        self.web_server = GraphWebServer(graph_dir=MEDIA_DIR, host="0.0.0.0", port=5000, auto_display_latest=True)
         threading.Thread(target=self.web_server.start, daemon=True).start()
         
         # Audio

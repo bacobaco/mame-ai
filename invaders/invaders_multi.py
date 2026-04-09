@@ -209,8 +209,7 @@ def actor_process(actor_id, port, config, transition_queue, score_queue, shared_
 
 class ApeXManager:
     def __init__(self):
-        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-        self.web_server = GraphWebServer(graph_dir=logs_dir, host="0.0.0.0", port=5000, auto_display_latest=True)
+        self.web_server = GraphWebServer(graph_dir=MEDIA_DIR, host="0.0.0.0", port=5000, auto_display_latest=True)
         threading.Thread(target=self.web_server.start, daemon=True).start()
         self.global_steps = 0
         self.global_episodes = 0

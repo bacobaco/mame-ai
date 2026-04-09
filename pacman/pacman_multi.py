@@ -99,7 +99,7 @@ def actor_process(actor_id, port, config, transition_queue, score_queue, shared_
         "execute P1_start(1)",
         "execute throttle_rate(20.0)", 
         "execute throttled(0)",
-        "frame_per_step 4",
+        "frame_per_step 3",
     ])
     
     _N = config.state_history_size
@@ -128,6 +128,7 @@ def actor_process(actor_id, port, config, transition_queue, score_queue, shared_
                 local_state_history.append(frame)
             
             current_loop_obs_stack = np.stack(local_state_history, axis=0)
+            pills_history = deque(maxlen=2)
             lives = 3
             done = False
             comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
@@ -149,13 +150,22 @@ def actor_process(actor_id, port, config, transition_queue, score_queue, shared_
                 if not batch_data: continue
                 next_frame, new_score, new_lives, alive, pills = batch_data
                 
+                # Récompense basée sur le score
                 reward = min((new_score - score) / 10.0, 160.0)
+                
+                # Bonus fin de niveau (si pills atteint le max ou repasse à zéro lors du changement)
+                if pills < 10 and (score > 1000) and (pills_history and pills_history[-1] > 200):
+                    reward += 50.0
+                    print(f"{Fore.YELLOW}✨ LEVEL CLEARED BONUS! {Style.RESET_ALL}")
+                
                 if new_lives < lives:
-                    reward -= 50
+                    reward -= 50 # Réduit à 50 (était 100) pour encourager un peu plus d'audace
                     lives = new_lives
-                reward -= 0.01 
+                
+                reward -= 0.01 # Pénalité de temps
                 
                 score = new_score
+                pills_history.append(pills)
                 local_state_history.append(next_frame)
                 next_obs_stack = np.stack(local_state_history, axis=0)
 
@@ -196,10 +206,11 @@ class PacmanApeX:
     """Orchestrateur central (Learner)"""
     def __init__(self):
         TeeLogger(os.path.join(SCRIPT_DIR, "logs")) # Activation du logging centralisé
-        self.web_server = GraphWebServer(graph_dir=os.path.join(SCRIPT_DIR, "logs"), host="0.0.0.0", port=5000, auto_display_latest=True)
+        self.web_server = GraphWebServer(graph_dir=MEDIA_DIR, host="0.0.0.0", port=5000, auto_display_latest=True)
         threading.Thread(target=self.web_server.start, daemon=True).start()
         self.global_steps = 0
         self.global_episodes = 0
+        self.best_mean_recorded = 0.0 # On suit la meilleure moyenne de la session
         self.mean_scores_history = []
         self.sigma_history = []
         self.episodes_history = [] # Nouvel historique pour l'axe X réel
@@ -256,10 +267,10 @@ class PacmanApeX:
         config = TrainingConfig(
             input_size=(4, 64, 56), state_history_size=4,
             hidden_layers=2, hidden_size=1024, output_size=4, # Rainbow Config
-            learning_rate=0.0000625, gamma=0.999, # Rainbow Standard
-            use_noisy=True, epsilon_start=0.0, epsilon_end=0.0, epsilon_linear=0.0,
+            learning_rate=0.0000625, gamma=0.999, # Retour à 0.999 pour favoriser le long terme (clearing levels)
+            use_noisy=True, epsilon_start=0.01, epsilon_end=0.01, epsilon_linear=0.0,
             epsilon_decay=0.0, epsilon_add=0.0,
-            buffer_capacity=200_000, batch_size=256, min_history_size=30000,
+            buffer_capacity=100_000, batch_size=256, min_history_size=30000,
             prioritized_replay=True, target_update_freq=5000,
             double_dqn=True, dueling=True, nstep=True, nstep_n=5,
             model_type="cnn", cnn_type="precise", mode="exploration", optimize_memory=True
@@ -285,7 +296,7 @@ class PacmanApeX:
 
 
         manager = mp.Manager()
-        transition_queue = mp.Queue(maxsize=100000)
+        transition_queue = mp.Queue(maxsize=30000) # Réduit de 100k à 30k pour éviter d'étouffer Windows
         score_queue = mp.Queue()
         shared_weights = manager.dict()
         shared_weights['model'] = {k: v.cpu() for k, v in trainer.dqn.state_dict().items()}
@@ -301,7 +312,7 @@ class PacmanApeX:
         time.sleep(NUM_ACTORS * 4)  
         print(f"\n{Fore.MAGENTA}🧠 [Learner] Démarrage de l'entraînement Ape-X ({ACTOR_DEVICE})...{Style.RESET_ALL}")
         collection_score = deque(maxlen=100)
-        best_mean_score = 1500.0
+        last_record_episode = 0 
         start_time = time.time()
         last_weight_sync = time.time()
         last_log_time = time.time()
@@ -312,7 +323,7 @@ class PacmanApeX:
         try:
             while True:
                 ingested = 0
-                while not transition_queue.empty() and ingested < 10000:
+                while not transition_queue.empty() and ingested < 20000: # Plus agressif
                     try:
                         tr = transition_queue.get_nowait()
                         trainer.replay_buffer.push(*tr)
@@ -335,7 +346,8 @@ class PacmanApeX:
                 if len(trainer.replay_buffer) >= config.min_history_size:
                     diff = self.global_steps - last_steps
                     if diff >= 4:
-                        iters = min(diff // 4, 64) 
+                        # On augmente la limite à 128 pour pouvoir rattraper le retard si la queue gonfle
+                        iters = min(diff // 4, 128) 
                         for _ in range(iters): trainer.train_step()
                         last_steps = self.global_steps
                     
@@ -382,17 +394,25 @@ class PacmanApeX:
                     last_log_time = time.time()
                     trainer.update_learning_rate(mean_sc)
                     
-                    if mean_sc > (best_mean_score + 10.0) and len(collection_score) >= 50:
-                        best_mean_score = mean_sc
+                    if mean_sc > (self.best_mean_recorded + 10.0) and len(collection_score) >= 50:
+                        self.best_mean_recorded = mean_sc
+                        last_record_episode = self.global_episodes
                         trainer.save_model(BEST_MODEL_FILENAME)
-                        print(f"{Fore.YELLOW}🏆 [RECORD] Nouveau record de moyenne : {best_mean_score:.1f} !{Style.RESET_ALL}")
+                        print(f"{Fore.YELLOW}🏆 [RECORD] Nouveau record de moyenne : {self.best_mean_recorded:.1f} !{Style.RESET_ALL}")
+
+                    # --- SIGMA BURST (FORCER L'EXPLORATION SI PLATEAU) ---
+                    if self.global_episodes - last_record_episode > 2000:
+                        print(f"\n{Fore.RED}💥 SIGMA BURST! Stagnation détectée ({self.global_episodes - last_record_episode} eps). Reset du bruit...{Style.RESET_ALL}")
+                        trainer.dqn.reset_noise() 
+                        last_record_episode = self.global_episodes # Reset timer
 
                     # --- SAUVEGARDE PÉRIODIQUE (TOUS LES 1000 ÉPISODES) ---
                     if self.global_episodes >= last_results_save + 1000:
                         last_results_save = (self.global_episodes // 1000) * 1000
                         now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                        res_periodic = (f"[{self.experiment_id}][{now_str}] Pac-Man Ape-X | LR={config.learning_rate} | H={config.hidden_size} | "
-                                        f"Eps: {self.global_episodes} | Mean: {mean_sc:.2f} | Max: {self.max_score:.2f} | "
+                        res_periodic = (f"[{self.experiment_id}][{now_str}] Pac-Man Ape-X | "
+                                        f"LR={config.learning_rate} | H={config.hidden_size} | Gamma={config.gamma} | CNN={config.cnn_type} | "
+                                        f"Eps: {self.global_episodes} | Mean: {mean_sc:.2f} | BMean: {self.best_mean_recorded:.2f} | Max: {self.max_score:.2f} | "
                                         f"Exp: {self.global_steps/1e6:.2f}M steps")
                         self._archive_result(res_periodic, config)
                         print(f"{Fore.GREEN}📝 Session {self.experiment_id} mise à jour (Eps {self.global_episodes}){Style.RESET_ALL}")
@@ -407,8 +427,9 @@ class PacmanApeX:
             
             mean_sc = np.mean(collection_score) if collection_score else 0
             now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            res_str = (f"[{self.experiment_id}][{now_str}][FIN SESSION] Pac-Man Ape-X | LR={config.learning_rate} | H={config.hidden_size} | "
-                       f"Eps: {self.global_episodes} | Mean: {mean_sc:.2f} | Max: {self.max_score:.2f} | Exp: {self.global_steps/1e6:.2f}M steps")
+            res_str = (f"[{self.experiment_id}][{now_str}][FIN SESSION] Pac-Man Ape-X | "
+                       f"LR={config.learning_rate} | H={config.hidden_size} | Gamma={config.gamma} | CNN={config.cnn_type} | "
+                       f"Eps: {self.global_episodes} | Mean: {mean_sc:.2f} | BMean: {self.best_mean_recorded:.2f} | Max: {self.max_score:.2f} | Exp: {self.global_steps/1e6:.2f}M steps")
             self._archive_result(res_str, config)
             sys.exit(0)
 

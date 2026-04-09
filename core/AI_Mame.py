@@ -85,6 +85,7 @@ class GraphWebServer:
                 <html>
                   <head>
                     <meta charset="utf-8">
+                    <meta http-equiv="refresh" content="30">
                     <title>Graphique des parties</title>
                   </head>
                   <body>
@@ -108,6 +109,7 @@ class GraphWebServer:
                 <html>
                   <head>
                     <meta charset="utf-8">
+                    <meta http-equiv="refresh" content="30">
                     <title>Évolution des parties</title>
                   </head>
                   <body>
@@ -619,8 +621,14 @@ class DQNModel(nn.Module):
                     nn.GroupNorm(8, 32), # ✅ Remplacement BatchNorm -> GroupNorm (Plus stable pour RL)
                     nn.ReLU(),
                     nn.MaxPool2d(kernel_size=2),
+
                     nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
                     nn.GroupNorm(8, 64), # ✅ Remplacement BatchNorm -> GroupNorm
+                    nn.ReLU(),
+                    nn.MaxPool2d(kernel_size=2),
+
+                    nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+                    nn.GroupNorm(16, 128),
                     nn.ReLU(),
                     nn.MaxPool2d(kernel_size=2),
                 )
@@ -757,8 +765,8 @@ class DQNTrainer:
         # Initialisation des autres composants d'entraînement...
         self.optimizer = optim.Adam(self.dqn.parameters(), lr=config.learning_rate,eps=1.5e-4)
         
-        # Scheduler : Réduit le Learning Rate si le score stagne (Patience 200 épisodes)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=200)
+        # Scheduler : Réduit le Learning Rate si le score stagne (Patience augmentée pour PacMan)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=1500, min_lr=5e-6)
 
         self.criterion = nn.MSELoss()
         # Utilisation du ReplayBuffer classique (échantillonnage uniforme)

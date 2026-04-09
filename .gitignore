@@ -25,3 +25,8 @@ venv/
 .vscode/
 .idea/
 .gemini/
+
+# Fichiers de travail locaux
+pacman/pacman_robot.py
+pacman/pacman.asm
+invaders/invaders_robot.py

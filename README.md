@@ -5,27 +5,30 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
 ![Aesthetics](https://img.shields.io/badge/Aesthetics-Premium-blueviolet)
 ![Framework](https://img.shields.io/badge/Framework-PyTorch-orange)
 ![Games](https://img.shields.io/badge/Games-PacMan%20%7C%20Invaders-yellow)
+![Version](https://img.shields.io/badge/Version-2.1-green)
 
 ---
 
 ## 🇺🇸 English Version
 
-### 🚀 Key Features
+### 🚀 Key Features (v2.1 Update)
 - **Distributed Ape-X Architecture**: Multiple actors (`NUM_ACTORS`) collect experiences in parallel, sent to a centralized GPU-based `Learner`.
-- **Rainbow DQN**: Includes NoisyNets (exploration), Prioritized Replay Buffer, Double DQN, Dueling Networks, and N-Step Learning.
-- **High-Performance MAME Bridge**: Socket-based communication between Python and MAME (via Lua script) for ultra-fast memory reading and command injection.
-- **Dynamic Dashboard**: Real-time performance analysis (moving averages, polynomial projections, records, queue saturation).
-- **Precise CNN Extraction**: Direct mapping of VRAM (Video RAM) and hardware sprites into tensors for the neural network.
+- **Rainbow DQN**: NoisyNets, Prioritized Replay Buffer, Double DQN, Dueling Networks, and N-Step Learning (n=5).
+- **[NEW] 3-Layer Precise CNN**: Upgraded CNN architecture (32, 64, 128 filters) with GroupNorm for superior spatial feature detection in complex maze environments.
+- **[NEW] Sigma Burst Mechanism**: Automatic exploration trigger that resets NoisyNet noise if performance stagnation is detected (2000 episodes without new record).
+- **[NEW] Reward Shaping (Level Focus)**: Implemented Level Clear bonuses (+50) to incentivize long-term strategy over simple survival.
+- **High-Performance MAME Bridge**: Socket-based communication between Python and MAME (via Lua script).
+- **Optimized Queue Handling**: Balanced multi-process communication tuned for Windows to avoid lock contention (30k queue / 100k buffer).
 
 ### 🛠️ Installation
-1. **Prerequisites**: Python 3.8+, MAME installed, and ROMs (`pacman`, `invaders`) in your MAME folder.
+1. **Prerequisites**: Python 3.8+, MAME installed, and ROMs (`pacman`, `invaders`).
 2. **Environment Setup**:
    ```bash
    git clone https://github.com/bacobaco/mame-ai.git
    cd mame-ai
    pip install -r core/requirements.txt
    ```
-3. **Paths**: Update `MAME_PATH` in the launch scripts (e.g., `pacman/pacman_multi.py`).
+3. **Paths**: Update `MAME_PATH` in `pacman/pacman_multi.py`.
 
 ### 🎮 Usage
 - **Train Pac-Man (Multi-Agent)**: `python pacman/pacman_multi.py`
@@ -35,11 +38,13 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
 
 ## 🇫🇷 Version Française
 
-### 🚀 Fonctionnalités Clés
-- **Architecture Ape-X Distribuée** : Utilisation de plusieurs acteurs collectant des expériences en parallèle, envoyées à un `Learner` centralisé sur GPU.
-- **Rainbow DQN** : NoisyNets, Prioritized Replay, Double DQN, Dueling Networks et N-Step Learning.
-- **Pont MAME Haute Performance** : Communication Socket (Lua) ultra-rapide.
-- **Dashboard Dynamique** : Analyse en temps réel des performances et projections.
+### 🚀 Fonctionnalités Clés (v2.1)
+- **Architecture Ape-X Distribuée** : Collecte parallèle massive par plusieurs acteurs.
+- **Rainbow DQN** : NoisyNets, PER, Double DQN, Dueling & N-Step.
+- **[NOUVEAU] CNN Precise 3-Couches** : Architecture étendue (128 filtres) avec GroupNorm pour une perception spatiale ultra-fine.
+- **[NOUVEAU] Sigma Burst** : Mécanisme d'exploration forcée en cas de stagnation (reset du bruit après 2000 épisodes sans record).
+- **[NOUVEAU] Reward Shaping** : Bonus de fin de niveau (+50) pour pousser l'IA à "nettoyer" le tableau plutôt que fuir.
+- **Optimisation Windows** : Gestion de queue (30k) et buffer (100k) optimisée pour éviter les ralentissements du système.
 
 ### 🛠️ Installation
 1. **Prérequis** : Python 3.8+, MAME, ROMs (`pacman`, `invaders`).
@@ -52,7 +57,7 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
 
 ### 🎮 Utilisation
 - **Entraîner Pac-Man** : `python pacman/pacman_multi.py`
-- **Dashboard** : `python analysis/plot_mean_pacman.py`
+- **Dashboard de Monitoring** : `python analysis/plot_mean_pacman.py`
 
 ---
 
@@ -61,7 +66,7 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
 - `pacman/`: Pac-Man specific interface and scripts.
 - `invaders/`: Space Invaders scripts.
 - `analysis/`: Monitoring and graphing scripts.
-- `media/`: High-resolution graphs and frame captures.
+- `media/`: Graphs and frame captures.
 
 ## 📝 License
 Free for educational and AI research purposes.
