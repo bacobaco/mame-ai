@@ -29,4 +29,10 @@ venv/
 # Fichiers de travail locaux
 pacman/pacman_robot.py
 pacman/pacman.asm
+pacman/pacman_hra.py
+pacman/pacman_elite.py
+pacman/* copy.py
+pacman/* - Copie.py
 invaders/invaders_robot.py
+invaders/* copy.py
+invaders/* - Copie.py

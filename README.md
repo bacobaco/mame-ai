@@ -30,21 +30,40 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
    ```
 3. **Paths**: Update `MAME_PATH` in `pacman/pacman_multi.py`.
 
-### 🎮 Usage
-- **Train Pac-Man (Multi-Agent)**: `python pacman/pacman_multi.py`
-- **Monitoring Dashboard**: `python analysis/plot_mean_pacman.py`
+### 🎮 Usage (Pac-Man & Space Invaders)
+
+#### 🟡 Pac-Man
+- **Single Agent (Standard DQN)**:
+  ```bash
+  python pacman/pacman.py
+  ```
+- **Multi-Agent (Ape-X Distributed)**:
+  ```bash
+  python pacman/pacman_multi.py
+  ```
+  *Note: Launches multiple MAME actors (configured in script) reporting to a central Learner.*
+
+#### 👾 Space Invaders
+- **Single Agent (Standard DQN)**:
+  ```bash
+  python invaders/invaders.py
+  ```
+- **Multi-Agent (Ape-X Distributed)**:
+  ```bash
+  python invaders/invaders_multi.py
+  ```
 
 ---
 
 ## 🇫🇷 Version Française
 
 ### 🚀 Fonctionnalités Clés (v2.1)
-- **Architecture Ape-X Distribuée** : Collecte parallèle massive par plusieurs acteurs.
-- **Rainbow DQN** : NoisyNets, PER, Double DQN, Dueling & N-Step.
-- **[NOUVEAU] CNN Precise 3-Couches** : Architecture étendue (128 filtres) avec GroupNorm pour une perception spatiale ultra-fine.
-- **[NOUVEAU] Sigma Burst** : Mécanisme d'exploration forcée en cas de stagnation (reset du bruit après 2000 épisodes sans record).
-- **[NOUVEAU] Reward Shaping** : Bonus de fin de niveau (+50) pour pousser l'IA à "nettoyer" le tableau plutôt que fuir.
-- **Optimisation Windows** : Gestion de queue (30k) et buffer (100k) optimisée pour éviter les ralentissements du système.
+- **Architecture Ape-X Distribuée** : Collecte parallèle massive par plusieurs acteurs pour un entraînement accéléré.
+- **Rainbow DQN** : Intégration complète de NoisyNets (exploration), PER (priorités), Double DQN (stabilité), Dueling (avantage) & N-Step (anticipation).
+- **[NOUVEAU] CNN Precise 3-Couches** : Architecture étendue (128 filtres) avec GroupNorm pour une perception spatiale ultra-fine des labyrinthes.
+- **[NOUVEAU] Sigma Burst** : Mécanisme d'exploration forcée automatique en cas de stagnation prolongée.
+- **[NOUVEAU] Reward Shaping** : Système de récompenses affiné pour Pac-Man (Bonus niveau) et Invaders (priorité soucoupes).
+- **Optimisation Windows** : Gestion de flux de données optimisée pour éviter les ralentissements système.
 
 ### 🛠️ Installation
 1. **Prérequis** : Python 3.8+, MAME, ROMs (`pacman`, `invaders`).
@@ -56,17 +75,23 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
    ```
 
 ### 🎮 Utilisation
-- **Entraîner Pac-Man** : `python pacman/pacman_multi.py`
-- **Dashboard de Monitoring** : `python analysis/plot_mean_pacman.py`
+
+#### 🟡 Pac-Man
+- **Agent Solo (DQN Standard)** : `python pacman/pacman.py`
+- **Multi-Agent (Ape-X Distribué)** : `python pacman/pacman_multi.py`
+
+#### 👾 Space Invaders
+- **Agent Solo (DQN Standard)** : `python invaders/invaders.py`
+- **Multi-Agent (Ape-X Distribué)** : `python invaders/invaders_multi.py`
 
 ---
 
 ## 📁 Project Structure
-- `core/`: AI Logic, DQN, Buffer, Socket Communication.
-- `pacman/`: Pac-Man specific interface and scripts.
-- `invaders/`: Space Invaders scripts.
-- `analysis/`: Monitoring and graphing scripts.
-- `media/`: Graphs and frame captures.
+- `core/`: Logique IA commune, DQN, Buffer PER, Communication Socket MAME.
+- `pacman/`: Interface spécifique, scripts d'entraînement et assets pour Pac-Man.
+- `invaders/`: Interface spécifique et scripts pour Space Invaders.
+- `analysis/`: Scripts de monitoring et génération de graphiques de performance.
+- `media/`: Captures d'écran, vidéos des meilleurs runs et logs graphiques.
 
 ## 📝 License
 Free for educational and AI research purposes.

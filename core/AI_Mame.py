@@ -25,6 +25,7 @@ from collections import deque
 import random, os, sys
 from typing import Dict, List, Tuple, Any, Optional
 from dataclasses import dataclass
+import re
 from datetime import datetime
 import atexit
 from flask import Flask, send_from_directory, render_template_string
@@ -188,11 +189,15 @@ class TeeLogger:
         )
 
     def write(self, message):
-        """Écrit simultanément dans le terminal et dans le fichier log"""
-        self.terminal.write(message)  # Affiche dans le terminal
-        self.terminal.flush()  # Assure l'affichage en temps réel
-        self.log_file.write(message)  # Sauvegarde dans le fichier
-        self.log_file.flush()  # Évite la perte de logs en cas de crash
+        """Écrit simultanément dans le terminal et dans le fichier log (sans couleurs)"""
+        # Affiche le message original avec couleurs dans le terminal
+        self.terminal.write(message)
+        self.terminal.flush()
+        
+        # Nettoie le message des codes ANSI (couleurs/esc) pour le fichier texte
+        clean_message = re.sub(r'\x1b\[[0-9;]*[mK]', '', message)
+        self.log_file.write(clean_message)
+        self.log_file.flush()
 
     def flush(self):
         """Flush les buffers (nécessaire pour sys.stdout)"""
@@ -545,12 +550,19 @@ class NoisyLinear(nn.Module):
         x = torch.randn(size)
         return x.sign() * torch.sqrt(torch.abs(x))
 
-    def reset_noise(self):
-        device = self.mu_weight.device # S'assurer que le bruit est sur le même device que les paramètres
+    def reset_noise(self, force_sigma=None):
+        """Rééchantillonne le bruit epsilon. Si force_sigma est fourni, booste temporary mu_weights."""
+        device = self.mu_weight.device
         epsilon_in = self._scale_noise(self.in_features).to(device)
         epsilon_out = self._scale_noise(self.out_features).to(device)
-        self.epsilon_weight = epsilon_out.ger(epsilon_in) # Assignation directe (évite l'erreur inplace en asynchrone)
-        self.epsilon_bias = epsilon_out                   
+        self.epsilon_weight = epsilon_out.ger(epsilon_in)
+        self.epsilon_bias = epsilon_out
+        
+        if force_sigma is not None:
+            # On réinitialise sigma à une valeur élevée pour forcer l'exploration
+            with torch.no_grad():
+                self.sigma_weight.fill_(force_sigma / math.sqrt(self.in_features))
+                self.sigma_bias.fill_(force_sigma / math.sqrt(self.in_features))
 
     def forward(self, input):
         if self.training:
@@ -730,10 +742,11 @@ class DQNModel(nn.Module):
             if isinstance(module, NoisyLinear)
         }
 
-    def reset_noise(self):
+    def reset_noise(self, force_sigma=None):
         if not self.config.use_noisy: return
         for module in self.modules():
-            if isinstance(module, NoisyLinear):  module.reset_noise()
+            if isinstance(module, NoisyLinear):
+                module.reset_noise(force_sigma=force_sigma)
 
 # ==================================================================================================
 # 5. ENTRAÎNEUR (TRAINER)
@@ -766,7 +779,7 @@ class DQNTrainer:
         self.optimizer = optim.Adam(self.dqn.parameters(), lr=config.learning_rate,eps=1.5e-4)
         
         # Scheduler : Réduit le Learning Rate si le score stagne (Patience augmentée pour PacMan)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=1500, min_lr=5e-6)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=1000, min_lr=1e-5)
 
         self.criterion = nn.MSELoss()
         # Utilisation du ReplayBuffer classique (échantillonnage uniforme)

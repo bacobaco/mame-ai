@@ -225,26 +225,20 @@ class PacmanInterface:
                 # VRAM est 1024 octets (32x32 tuiles).
                 raw_list = list(map(int, response_vram[0].split(",")))
                 
-                # --- CORRECTION VRAM (Column-Major -> Row-Major) ---
-                # La VRAM Namco est stockée colonne par colonne.
-                # On doit la reconstruire en grille (Row, Col) correcte.
-                # MURS = 0.2 (Normalisé 0-1 pour optimize_memory)
-                grid_small = np.full((32, 28), 0.2, dtype=np.float32)
+                # --- CONTRASTE AMÉLIORÉ (Sauts de 0.3 entre Danger/Mur/Chemin) ---
+                # MURS = 0.3 (Gris sombre)
+                grid_small = np.full((32, 28), 0.3, dtype=np.float32)
                 
                 for idx, val in enumerate(raw_list):
                     if idx >= 1024: break
-                    # Mapping Hardware Namco :
-                    # Index = Col * 32 + Row
-                    # Les colonnes visibles sont ~2 à 29. On mappe vers 0-31.
                     r = idx % 32
-                    # CORRECTION MAJEURE : Alignement Gauche->Droite (Normal)
-                    # On décale de -2 pour centrer les colonnes 2-29 sur 0-27
-                    c = (idx // 32) - 2
+                    # CORRECTION MIROIR : On applique 27 - col pour aligner sur le hardware
+                    c = 27 - ((idx // 32) - 2)
                     
                     if 0 <= r < 32 and 0 <= c < 28:
-                        if val == 0x40: grid_small[r, c] = 0.4 # Vide (Gris moyen)
-                        elif val == 0x10: grid_small[r, c] = 0.6 # Pastille (Clair)
-                        elif val == 0x14: grid_small[r, c] = 0.9 # Power (Très clair)
+                        if val == 0x40: grid_small[r, c] = 0.6 # Chemin Vide (Gris moyen)
+                        elif val == 0x10: grid_small[r, c] = 1.0 # Pastille (Blanc pur)
+                        elif val == 0x14: grid_small[r, c] = 1.0 # Power (Blanc pur)
                 
                 # --- CONTRASTE AMÉLIORÉ ---
                 # Upscaling 32x32 -> 64x64 (Facteur 2)
@@ -301,12 +295,13 @@ class PacmanInterface:
                     state = int(response_pos[10 + i])
                     
                     # Détermination de la valeur sur la grille selon l'état
-                    val = 0.0 # DANGER MORTEL (0.0 = Noir/Trou, distinct des murs 0.2)
+                    # Danger = 0.0 (Noir)
+                    val = 0.0 
                     
                     if state == 1 or state == 2: # Blue ou Flash
-                        val = 1.0 # CIBLE PRIORITAIRE (Max Reward)
+                        val = 1.0 # Mangeable (Cible, Blanc pur comme les pastilles)
                     elif state >= 3: # Eaten (3) ou Eyes (4+)
-                        val = 0.4 # Neutre (Invisible = Vide)
+                        val = 0.6 # Neutre (Identique au couloir vide)
 
                     fr = min(63, max(0, (fx + offset_x) // 4))
                     fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
@@ -409,15 +404,15 @@ class PacmanInterface:
         # 2. Parsing CNN State
         try:
             raw_vram = list(map(int, response[0].split(",")))
-            grid_small = np.full((32, 28), 0.2, dtype=np.float32)
+            grid_small = np.full((32, 28), 0.3, dtype=np.float32)
             for idx, val in enumerate(raw_vram):
                 if idx >= 1024: break
                 r = idx % 32
-                c = (idx // 32) - 2
+                c = 27 - ((idx // 32) - 2)
                 if 0 <= r < 32 and 0 <= c < 28:
-                    if val == 0x40: grid_small[r, c] = 0.4
-                    elif val == 0x10: grid_small[r, c] = 0.6
-                    elif val == 0x14: grid_small[r, c] = 0.9
+                    if val == 0x40: grid_small[r, c] = 0.6
+                    elif val == 0x10: grid_small[r, c] = 1.0
+                    elif val == 0x14: grid_small[r, c] = 1.0
             grid = np.kron(grid_small, np.ones((2, 2)))
 
             # Sprites Positions (Indices 1-14)
@@ -430,9 +425,10 @@ class PacmanInterface:
             for i in range(4):
                 fx, fy = int(response[3 + i*2]), int(response[4 + i*2])
                 state = int(response[11 + i])
-                val = 0.0 if state < 1 else (1.0 if state <= 2 else 0.4)
+                val = 0.0 if state < 1 else (1.0 if state <= 2 else 0.6)
                 fr = min(63, max(0, (fx + offset_x) // 4))
                 fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
+                grid[max(0, pr):min(64, pr+2), max(0, pc):min(56, pc+2)] = 0.8
                 grid[max(0, fr):min(64, fr+2), max(0, fc):min(56, fc+2)] = val
         except:
             grid = np.zeros((64, 56), dtype=np.float32)
@@ -563,14 +559,79 @@ class PacmanApp:
         self.flag_create_fig = False
         self.flag_F8_pressed = False
         self.is_normal_speed = False
-        self.training_speed = 20.0
+        self.training_speed = 5.0
         self.slow_speed = 0.2
         self.pending_commands = []
         
         # Web Server
         self.web_server = GraphWebServer(graph_dir=MEDIA_DIR, host="0.0.0.0", port=5000, auto_display_latest=True)
         
+        # --- INITIALISATION RADAR TEMPS RÉEL ---
+        pygame.init()
+        # Fenêtre large pour afficher Radar (280px) + Vision IA (280px)
+        self.radar_screen = pygame.display.set_mode((560, 330))
+        pygame.display.set_caption("Pacman AI Training - Realtime Monitor (Radar | Vision IA)")
+        self.clock = pygame.time.Clock()
+        
         pygame.mixer.init()
+
+    def update_radar(self, responses, next_frame):
+        """Dessine le radar et la vision IA en temps réel."""
+        if not responses or len(responses) < 15: return
+        
+        # 1. Fond
+        self.radar_screen.fill((20, 20, 20))
+        
+        # --- PARTIE GAUCHE : RADAR LOGIQUE (32x28) ---
+        # On utilise le même code que pacman_robot.py
+        try:
+            vram = list(map(int, responses[0].split(",")))
+            # Dessin de la grille
+            for idx, val in enumerate(vram):
+                if idx >= 1024: break
+                # Mapping Midway : Column-Major
+                r = idx % 32
+                c = 27 - ((idx // 32) - 2)
+                if 0 <= r < 32 and 0 <= c < 28:
+                    if val in [64, 16, 20, 0xBF]: # Murs/Vides
+                        color = (0, 0, 80) if val == 64 else (10, 10, 10)
+                        if val in [16, 20]: # Pastilles
+                            pygame.draw.circle(self.radar_screen, (255, 255, 0), (c*10+5, r*10+5), 2)
+                        else:
+                            pygame.draw.rect(self.radar_screen, color, (c*10, r*10, 9, 9))
+            
+            # Sprites : Pac-Man (index 1,2) et Fantômes (index 3-10)
+            # Offset Milestone : H=+2, V=+0
+            # Pacman
+            py, px = int(responses[1]), int(responses[2])
+            pr, pc = py // 8, (27 - (px // 8) + 2) % 28
+            pygame.draw.circle(self.radar_screen, (255, 255, 255), (pc*10+5, pr*10+5), 5)
+            
+            # Fantômes
+            for i in range(4):
+                gy, gx = int(responses[3+i*2]), int(responses[4+i*2])
+                state = int(responses[11+i])
+                gr, gc = gy // 8, (27 - (gx // 8) + 2) % 28
+                color = (255, 0, 0) if state == 0 else (0, 255, 255)
+                pygame.draw.rect(self.radar_screen, color, (gc*10+1, gr*10+1, 8, 8))
+        except: pass
+
+        # --- PARTIE DROITE : VISION IA (64x56) ---
+        # On dessine le tenseur 'frame' tel qu'il est envoyé au cerveau
+        start_x = 280
+        if next_frame is not None:
+            # next_frame est 64x56 normalisé [0,1]
+            for r in range(64):
+                for c in range(56):
+                    val = int(next_frame[r, c] * 255)
+                    # On upscale légèrement pour remplir l'espace (x4 pixels)
+                    # row * 5 pixels car 64*5 = 320px
+                    pygame.draw.rect(self.radar_screen, (val, val, val), (start_x + c*5, r*5, 5, 5))
+
+        # Séparateur
+        pygame.draw.line(self.radar_screen, (100, 100, 100), (280, 0), (280, 320), 2)
+        
+        pygame.display.flip()
 
     def log_results(self, nb_episodes, mean_scores, config, nb_mess, nb_step_frame, r_kill, r_step):
         filename = os.path.join(SCRIPT_DIR, "resultats_pacman.txt")
@@ -748,15 +809,15 @@ class PacmanApp:
         config = TrainingConfig(
             state_history_size=N,
             input_size=input_size,
-            hidden_layers=1,
-            hidden_size=1024, # Capacité accrue (Rainbow Standard)
+            hidden_layers=2,
+            hidden_size=1024,
             output_size=4,
-            learning_rate=0.0000625, # Plus stable pour NoisyNet
-            gamma=0.999, # Long terme maximisé
+            learning_rate=0.0000625,
+            gamma=0.99, # Standard DeepMind
             use_noisy=use_noisy,
-            buffer_capacity=100000, 
+            buffer_capacity=500000, 
             batch_size=256,
-            min_history_size=20000, 
+            min_history_size=30000, 
             cnn_type="precise",
             model_type=model_type,
             epsilon_start=epsilon_start,
@@ -767,15 +828,15 @@ class PacmanApp:
             double_dqn=True,
             dueling=True,
             nstep=True,       
-            nstep_n=5,
-            prioritized_replay=True, # Rainbow: PER
-            optimize_memory=True # ✅ ACTIVÉ : Maintenant sûr grâce à la normalisation [0,1]
+            nstep_n=3,
+            prioritized_replay=True,
+            optimize_memory=True
         )
 
         print(f"Configuration Input Size: {input_size} (Model: {model_type})")
         
         # Recorder & OBS
-        record = False # Mettre à True pour enregistrer avec OBS
+        record = True # Mettre à True pour enregistrer avec OBS
         recorder = None
         if record:
             recorder = ScreenRecorder()
@@ -878,6 +939,8 @@ class PacmanApp:
             alive = 0
             comm.communicate(["wait_for 6"])
             while alive == 0:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: self.flag_quit = True
                 data = game.get_score_and_lives()
                 if data: _, _, alive, _ = data
                 if self.debug >= 1: print("[DEBUG] dans le while debut de partie: alive=",alive)
@@ -903,6 +966,8 @@ class PacmanApp:
 
             comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
             while not done:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: self.flag_quit = True
                 if self.flag_quit: break
 
                 # Action
@@ -919,6 +984,9 @@ class PacmanApp:
                     
                 next_frame, new_score, new_lives, alive, pills = batch_data
                 
+                # --- UPDATE VISUALISATION TEMPS RÉEL ---
+                self.update_radar(responses, next_frame)
+                
                 if self.flag_F8_pressed:
                     Visualizer.afficher_frame(next_frame)
                     self.flag_F8_pressed = False
@@ -929,17 +997,15 @@ class PacmanApp:
                 
                 # Reward Shaping
                 reward = 0
-                # Récompense pour le score
+                # --- REWARD CLIPPING : DEEPMIND STANDARD (+1/-1) ---
+                reward = 0.0
                 if new_score > score:
-                    reward += min((new_score - score) / 10.0, 160.0) # Clip augmenté (160.0) pour valoriser les 4 fantômes (1600pts)
+                    reward = 1.0
                 
-                # Pénalité de mort
                 if new_lives < lives:
-                    reward -= 50 
+                    reward = -1.0
                     lives = new_lives
-                
-                # Pénalité de temps (légère) pour encourager l'action
-                reward -= 0.01 # Réduit pour éviter le suicide tactique
+                # ----------------------------------------------------
                 
                 score = new_score
                 sum_rewards += reward
@@ -989,6 +1055,8 @@ class PacmanApp:
                     if self.debug >= 1: print("[DEBUG] Mort! alive=",alive,"-lives=",lives)
                     comm.communicate(["wait_for 6"])
                     while alive == 0:
+                        for event in pygame.event.get():
+                            if event.type == pygame.QUIT: self.flag_quit = True
                         data = game.get_score_and_lives()
                         if data: _, lives, alive, _ = data
                         if self.debug >= 1: print("[DEBUG] boucle while (mort) alive=",alive,"lives=",lives)
@@ -1070,7 +1138,7 @@ class PacmanApp:
             print(f"{Fore.GREEN}[{timestamp}] Episode {episode} finished. Score: {score}. Mean: {mean:.2f}. {explo_str}{Style.RESET_ALL}")
             
             # Sauvegarde Best Model
-            if len(scores) >= 100 and mean > (best_mean_score + 5):
+            if len(scores) >= 200 and mean > (best_mean_score + 5):
                 best_mean_score = mean
                 trainer.save_model(best_model_filename)
                 print(f"{Fore.YELLOW}🏆 Record moyen ({best_mean_score:.2f}) ! Sauvegarde best.{Style.RESET_ALL}")
