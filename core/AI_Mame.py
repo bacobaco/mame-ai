@@ -92,14 +92,14 @@ class GraphWebServer:
                   <body>
                     <h1>Graphique des parties</h1>
                     {% if latest_file %}
-                      <img src="/graphs/{{ latest_file }}" alt="Graphique des parties" style="max-width:100%; height:auto;">
+                      <img src="/graphs/{{ latest_file }}?t={{ time_stamp }}" alt="Graphique des parties" style="max-width:100%; height:auto;">
                     {% else %}
                       <p>Aucun graphique disponible.</p>
                     {% endif %}
                   </body>
                 </html>
                 """
-                return render_template_string(html, latest_file=latest_file)
+                return render_template_string(html, latest_file=latest_file, time_stamp=datetime.now().timestamp())
             else:
                 # Sinon, affiche la liste des fichiers disponibles
                 files = [
@@ -171,27 +171,38 @@ class TeeLogger:
     d'afficher dans la console. Utile pour garder une trace des entraînements longs.
     """
 
-    def __init__(self, log_dir="logs"):
+    def __init__(self, log_dir="logs", session_id=None):
         os.makedirs(log_dir, exist_ok=True)  # Crée le dossier logs s'il n'existe pas
-        log_filename = (
-            f"{log_dir}/training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        )
+        if session_id is not None:
+            log_filename = f"{log_dir}/training_log_session_{session_id}.txt"
+            mode = "a"
+        else:
+            log_filename = f"{log_dir}/training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            mode = "w"
 
         self.terminal = sys.stdout  # Sauvegarde la sortie standard originale
-        self.log_file = open(log_filename, "w", encoding="utf-8")
+        self.log_file = open(log_filename, mode, encoding="utf-8")
         self.log_filename = log_filename
 
         sys.stdout = self
         sys.stderr = self  # Redirige aussi les erreurs vers le fichier log
 
-        print(
-            f"\n📜 [LOGGING ACTIVÉ] Toutes les sorties seront enregistrées dans {log_filename}\n"
-        )
+        if mode == "a":
+            print(
+                f"\n📜 [LOGGING REPRIS] Reprise de l'enregistrement (mode Append) dans {log_filename}\n"
+            )
+        else:
+            print(
+                f"\n📜 [LOGGING ACTIVÉ] Toutes les sorties seront enregistrées dans {log_filename}\n"
+            )
 
     def write(self, message):
         """Écrit simultanément dans le terminal et dans le fichier log (sans couleurs)"""
         # Affiche le message original avec couleurs dans le terminal
-        self.terminal.write(message)
+        try:
+            self.terminal.write(message)
+        except UnicodeEncodeError:
+            self.terminal.write(message.encode('ascii', 'replace').decode('ascii'))
         self.terminal.flush()
         
         # Nettoie le message des codes ANSI (couleurs/esc) pour le fichier texte
@@ -332,10 +343,6 @@ class GPUReplayBuffer:
 
             self.states[self.pos].copy_(state.to(self.device))
             self.next_states[self.pos].copy_(next_state.to(self.device))
-
-        self.actions[self.pos] = torch.tensor(action, dtype=torch.int64).to(self.device)
-        self.rewards[self.pos] = torch.tensor(reward, dtype=torch.float32).to(self.device)
-        self.dones[self.pos] = torch.tensor(float(done), dtype=torch.float32).to(self.device)
 
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
@@ -587,7 +594,37 @@ class NoisyLinear(nn.Module):
 #  precise    | 2       | Non         | Oui     | ~64×26×28      | Moyen + FC lourd | 🟡 Moyen Lent #
 #  original   | 3       | Oui (4,2,2) | Non     | ~128×13×14     | Conv rapide      | 🟢 Rapide     #
 #  deepmind   | 3       | Oui (4,2,1) | Non     | ~64×11×12      | Léger + FC 512   | ✅ Efficace   #
+#  impala     | 15      | Non         | Oui     | ~128×8×7       | Très lourd GN+Res| 🔴 Lent        #
 #####################################################################################################
+class ResidualBlock(nn.Module):
+    """Bloc résiduel classique pour Impala CNN."""
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.gn1 = nn.GroupNorm(8, channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.gn2 = nn.GroupNorm(8, channels)
+
+    def forward(self, x):
+        out = F.relu(self.gn1(self.conv1(x)))
+        out = self.gn2(self.conv2(out))
+        return F.relu(x + out)
+
+class ImpalaStage(nn.Module):
+    """Étape de traitement d'Impala CNN avec MaxPool2d et blocs résiduels."""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.res1 = ResidualBlock(out_channels)
+        self.res2 = ResidualBlock(out_channels)
+
+    def forward(self, x):
+        x = self.maxpool(F.relu(self.conv(x)))
+        x = self.res1(x)
+        x = self.res2(x)
+        return x
+
 class DQNModel(nn.Module):
     """
     DQNModel est une architecture de réseau neuronal modulaire utilisée pour l'entraînement par renforcement
@@ -598,11 +635,12 @@ class DQNModel(nn.Module):
     - CNN "original" : 3 convolutions avec stride (4, 2, 2) et BatchNorm
     - CNN "precise" : 2 convolutions avec stride=1 et MaxPooling (haute fidélité spatiale)
     - CNN "deepmind" : architecture classique de DeepMind pour Atari (8x8, 4) → (4x4, 2) → (3x3, 1)
+    - CNN "impala" : architecture résiduelle profonde (ResNet) avec GroupNorm pour une perception haut de gamme
 
     Paramètres :
     - input_size : tuple (channels, height, width) ou int (MLP)
     - hidden_size : taille des couches fully connected
-    - cnn_type : "original", "precise" ou "deepmind"
+    - cnn_type : "original", "precise", "deepmind" ou "impala"
     - output_size : nombre d'actions discrètes (ex: 6 pour Space Invaders)
 
     La méthode forward applique le bon pipeline en fonction du type de modèle sélectionné.
@@ -625,6 +663,13 @@ class DQNModel(nn.Module):
                     nn.ReLU(),
                     nn.Conv2d(64, 64, kernel_size=3, stride=1),
                     nn.ReLU(),
+                )
+
+            elif config.cnn_type == "impala":
+                self.encoder = nn.Sequential(
+                    ImpalaStage(channels, 32),
+                    ImpalaStage(32, 64),
+                    ImpalaStage(64, 128)
                 )
 
             elif config.cnn_type == "precise":
@@ -776,7 +821,7 @@ class DQNTrainer:
         self.copy_weights(self.dqn, self.target_dqn)
         self.set_mode(config.mode)
         # Initialisation des autres composants d'entraînement...
-        self.optimizer = optim.Adam(self.dqn.parameters(), lr=config.learning_rate,eps=1.5e-4)
+        self.optimizer = optim.AdamW(self.dqn.parameters(), lr=config.learning_rate, eps=1.5e-4, weight_decay=1e-5)
         
         # Scheduler : Réduit le Learning Rate si le score stagne (Patience augmentée pour PacMan)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=1000, min_lr=1e-5)
@@ -815,10 +860,9 @@ class DQNTrainer:
         self.config.mode = mode.lower()
         if self.config.mode == "exploitation":
             self.dqn.eval()
-            self.target_dqn.eval()
         else:
             self.dqn.train()
-            self.target_dqn.train()    
+        self.target_dqn.eval()  # Target network toujours en eval (jamais entraîné)
 
     def select_action(self, state: np.ndarray) -> int:
         """Sélectionne une action selon la politique actuelle (NoisyNet ou Epsilon-Greedy)."""
@@ -827,13 +871,13 @@ class DQNTrainer:
         # --- Phase d'évaluation Rainbow ---
         if self.config.rainbow_eval > 0:
             if self.actor_steps % self.config.rainbow_eval == 0 and self.eval_steps == 0:
-                print(f"\n{Fore.MAGENTA}🌈 Starting Rainbow evaluation phase...{Style.RESET_ALL}")
+                if not self.silent: print(f"\n{Fore.MAGENTA}🌈 Starting Rainbow evaluation phase...{Style.RESET_ALL}")
                 self.set_mode("exploitation") 
                 self.eval_steps = 1
             elif self.eval_steps > 0:
                 self.eval_steps += 1
                 if self.eval_steps >= (self.config.rainbow_eval_pourcent / 100 * self.config.rainbow_eval):
-                    print(f"\n{Fore.MAGENTA}🌈 ...Rainbow evaluation phase ended. Resuming exploration.{Style.RESET_ALL}")
+                    if not self.silent: print(f"\n{Fore.MAGENTA}🌈 ...Rainbow evaluation phase ended. Resuming exploration.{Style.RESET_ALL}")
                     self.set_mode("exploration")
                     self.eval_steps = 0
         # ----------------------------------

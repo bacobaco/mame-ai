@@ -225,9 +225,9 @@ class PacmanInterface:
                 # VRAM est 1024 octets (32x32 tuiles).
                 raw_list = list(map(int, response_vram[0].split(",")))
                 
-                # --- CONTRASTE AMÉLIORÉ (Sauts de 0.3 entre Danger/Mur/Chemin) ---
-                # MURS = 0.3 (Gris sombre)
-                grid_small = np.full((32, 28), 0.3, dtype=np.float32)
+                # --- CONTRASTE AMÉLIORÉ ---
+                # MURS = 0.2 (Gris sombre)
+                grid_small = np.full((32, 28), 0.2, dtype=np.float32)
                 
                 for idx, val in enumerate(raw_list):
                     if idx >= 1024: break
@@ -236,9 +236,9 @@ class PacmanInterface:
                     c = 27 - ((idx // 32) - 2)
                     
                     if 0 <= r < 32 and 0 <= c < 28:
-                        if val == 0x40: grid_small[r, c] = 0.6 # Chemin Vide (Gris moyen)
-                        elif val == 0x10: grid_small[r, c] = 1.0 # Pastille (Blanc pur)
-                        elif val == 0x14: grid_small[r, c] = 1.0 # Power (Blanc pur)
+                        if val == 0x40: grid_small[r, c] = 0.4 # Chemin Vide (Gris moyen)
+                        elif val == 0x10: grid_small[r, c] = 0.6 # Pastille (Clair)
+                        elif val == 0x14: grid_small[r, c] = 0.9 # Power (Très clair)
                 
                 # --- CONTRASTE AMÉLIORÉ ---
                 # Upscaling 32x32 -> 64x64 (Facteur 2)
@@ -298,10 +298,10 @@ class PacmanInterface:
                     # Danger = 0.0 (Noir)
                     val = 0.0 
                     
-                    if state == 1 or state == 2: # Blue ou Flash
-                        val = 1.0 # Mangeable (Cible, Blanc pur comme les pastilles)
+                    if state == 1 or state == 2:
+                        val = 1.0 # Mangeable (Cible, Blanc pur)
                     elif state >= 3: # Eaten (3) ou Eyes (4+)
-                        val = 0.6 # Neutre (Identique au couloir vide)
+                        val = 0.4 # Neutre (Identique au couloir vide)
 
                     fr = min(63, max(0, (fx + offset_x) // 4))
                     fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
@@ -404,15 +404,15 @@ class PacmanInterface:
         # 2. Parsing CNN State
         try:
             raw_vram = list(map(int, response[0].split(",")))
-            grid_small = np.full((32, 28), 0.3, dtype=np.float32)
+            grid_small = np.full((32, 28), 0.2, dtype=np.float32)
             for idx, val in enumerate(raw_vram):
                 if idx >= 1024: break
                 r = idx % 32
                 c = 27 - ((idx // 32) - 2)
                 if 0 <= r < 32 and 0 <= c < 28:
-                    if val == 0x40: grid_small[r, c] = 0.6
-                    elif val == 0x10: grid_small[r, c] = 1.0
-                    elif val == 0x14: grid_small[r, c] = 1.0
+                    if val == 0x40: grid_small[r, c] = 0.4
+                    elif val == 0x10: grid_small[r, c] = 0.6
+                    elif val == 0x14: grid_small[r, c] = 0.9
             grid = np.kron(grid_small, np.ones((2, 2)))
 
             # Sprites Positions (Indices 1-14)
@@ -425,14 +425,12 @@ class PacmanInterface:
             for i in range(4):
                 fx, fy = int(response[3 + i*2]), int(response[4 + i*2])
                 state = int(response[11 + i])
-                val = 0.0 if state < 1 else (1.0 if state <= 2 else 0.6)
+                val = 0.0 if state < 1 else (1.0 if state <= 2 else 0.4)
                 fr = min(63, max(0, (fx + offset_x) // 4))
                 fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
-                grid[max(0, pr):min(64, pr+2), max(0, pc):min(56, pc+2)] = 0.8
                 grid[max(0, fr):min(64, fr+2), max(0, fc):min(56, fc+2)] = val
         except:
             grid = np.zeros((64, 56), dtype=np.float32)
-
         return grid, score, lives, alive_flag, pills
 
 class StateExtractor:
@@ -453,77 +451,145 @@ class StateExtractor:
 
 class Visualizer:
     @staticmethod
-    def create_fig(nb_parties, scores_moyens, fenetre, epsilons, rewards, nb_steps, filename="Pacman_fig", high_score=0, label_curve="Epsilon", max_scores=None, x_axis=None):
+    def create_fig(nb_parties, scores_moyens, fenetre, epsilons, rewards, nb_steps, filename="Pacman_fig", high_score=0, label_curve="Epsilon", max_scores=None, x_axis=None, session_info=None):
         matplotlib.use("Agg")
         plt.close("all")
-        fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
         
-        ax1.set_xlabel("Episodes")
-        ax1.set_ylabel(label_curve, color="tab:blue")
+        # Détermine si les longueurs d'épisodes sont disponibles
+        has_steps = (nb_steps is not None and len(nb_steps) > 0 and len(nb_steps) == len(scores_moyens))
+        
+        # Palette de couleurs Premium (Thème Sombre moderne)
+        fig_bg = "#0f0f13"     # Fond de figure sombre profond
+        ax_bg = "#151520"      # Fond d'axe anthracite bleuté
+        text_color = "#f8fafc" # Texte blanc cassé
+        grid_color = "#27273a" # Lignes de grille discrètes
+        cyan_color = "#00d2fc" # Epsilon / Sigma (Bleu néon)
+        rose_color = "#ff3366" # Score moyen (Rose/Rouge néon)
+        green_color = "#10ac84" # Max score (Émeraude)
+        orange_color = "#ff9f43" # Tendance globale (Orange chaud)
+        purple_color = "#a29bfe" # Tendance locale (Lavande)
+        
+        # Configuration des styles par défaut de matplotlib pour cette figure
+        plt.rcParams['text.color'] = text_color
+        plt.rcParams['axes.labelcolor'] = text_color
+        plt.rcParams['xtick.color'] = "#94a3b8"
+        plt.rcParams['ytick.color'] = "#94a3b8"
+        plt.rcParams['grid.color'] = grid_color
+        plt.rcParams['grid.linestyle'] = '--'
+        plt.rcParams['grid.alpha'] = 0.6
+        
+        # Création dynamique de la figure : 2 sous-graphiques si steps dispos, sinon 1 seul grand graphique
+        if has_steps:
+            fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(13, 9.5), gridspec_kw={'height_ratios': [2.8, 1]}, facecolor=fig_bg)
+        else:
+            fig, ax1 = plt.subplots(figsize=(13, 7.2), facecolor=fig_bg)
+            ax3 = None
+            
+        # Ajustement des marges
+        fig.subplots_adjust(top=0.86, bottom=0.09, left=0.08, right=0.92, hspace=0.22)
+        
         x_plot = x_axis if x_axis is not None else np.arange(len(epsilons))
-        ax1.plot(x_plot, epsilons, color="tab:blue", linestyle="--", label=label_curve)
-        ax1.tick_params(axis='y', labelcolor="tab:blue")
-        ax1.legend(loc="upper left")
         
+        # --- GRAPH 1 : SCORES & EXPLORATION ---
+        ax1.set_facecolor(ax_bg)
+        ax1.set_xlabel("Épisodes", fontsize=10, fontweight="bold", labelpad=6)
+        ax1.set_ylabel(label_curve, color=cyan_color, fontsize=10, fontweight="bold", labelpad=6)
+        
+        # Courbe Epsilon / Sigma
+        ax1.plot(x_plot, epsilons, color=cyan_color, linestyle="--", linewidth=1.5, label=label_curve, alpha=0.8)
+        ax1.tick_params(axis='y', labelcolor=cyan_color)
+        ax1.set_zorder(1)
+        
+        # Axe jumeau pour les scores
         ax2 = ax1.twinx()
-        ax2.set_ylabel("Score (Moyen & Max)", color="tab:red")
-        ax2.plot(x_plot, scores_moyens, color="tab:red", label="Score Moyen")
+        ax2.set_ylabel("Score", color=rose_color, fontsize=10, fontweight="bold", labelpad=12, rotation=270)
         
-        # Ajout courbe Max Score (Rolling Max) pour voir le potentiel max
+        # Enveloppe de performance (Fill entre moyenne et max)
         if max_scores and len(max_scores) == len(scores_moyens):
-            ax2.plot(x_plot, max_scores, color="tab:green", alpha=0.3, linestyle="-", linewidth=1, label="Max Score (fenêtre)")
+            ax2.fill_between(x_plot, scores_moyens, max_scores, color=rose_color, alpha=0.08, label="Enveloppe Max-Moyenne")
+            ax2.plot(x_plot, max_scores, color=green_color, alpha=0.4, linestyle="-", linewidth=1.0, label="Max (Fenêtre)")
             
-        ax2.tick_params(axis='y', labelcolor="tab:red")
-        ax2.legend(loc="upper right")
+        # Courbe Score Moyen
+        ax2.plot(x_plot, scores_moyens, color=rose_color, linewidth=2.0, label="Score Moyen")
+        ax2.tick_params(axis='y', labelcolor=rose_color)
         
-        # Ajout des lignes de tendance (comme invaders.py)
-        if len(scores_moyens) > 1:
-            z = np.polyfit(x_plot, scores_moyens, 1)
-            p = np.poly1d(z)
-            ax2.plot(x_plot, p(x_plot), "tab:orange", alpha=0.6)           
-            pente_globale = z[0]
-            # Affichage pente globale
-            midpoint_global = x_plot[len(x_plot)//2]
-            ax2.text(midpoint_global, p(midpoint_global), f"Pente Globale: {pente_globale:.2f}", color="tab:orange", fontweight="bold", ha="center", va="bottom")
+        # Bordures et style d'axe
+        for ax in [ax1, ax2]:
+            ax.spines['top'].set_visible(False)
+            ax.spines['left'].set_color(grid_color)
+            ax.spines['right'].set_color(grid_color)
+            ax.spines['bottom'].set_color(grid_color)
             
-            # Pente locale
-            n = min(100, len(scores_moyens)) # On regarde les 100 derniers points enregistrés
-            x_recent = x_plot[-n:]
-            z_recent = np.polyfit(x_recent, scores_moyens[-n:], 1)
-            p_recent = np.poly1d(z_recent)
-            ax2.plot(x_recent, p_recent(x_recent), "tab:purple", linestyle="--")
-            pente_recent = z_recent[0]
-            
-            midpoint = x_plot[-n//2]
-            ax2.text(midpoint, p_recent(midpoint), f"Pente: {pente_recent:.2f}", color="tab:purple", fontweight="bold")
-
-        ax1.set_title(f"Pacman Training - {nb_parties} episodes - High Score: {high_score}")
-
-        # --- Graphique 2 : Distribution Gaussienne ---
-        if len(scores_moyens) > 1:
-            data = scores_moyens
-            mu = np.mean(data)
-            sigma = np.std(data)
-            
-            if sigma > 0:
-                min_val, max_val = min(data), max(data)
-                # Bins de 50 points
-                start_bin = np.floor(min_val / 50) * 50
-                end_bin = np.ceil(max_val / 50) * 50
-                bins = np.arange(start_bin, end_bin + 51, 50)
+        ax1.grid(True, which='both')
+        
+        # Calcul des lignes de tendance
+        if len(scores_moyens) > 1 and np.max(x_plot) > np.min(x_plot):
+            try:
+                z = np.polyfit(x_plot, scores_moyens, 1)
+                p = np.poly1d(z)
+                ax2.plot(x_plot, p(x_plot), color=orange_color, alpha=0.7, linestyle="-", linewidth=1.2, label=f"Tendance Globale ({z[0]:+.2f}/ep)")
                 
-                ax3.hist(data, bins=bins, density=True, alpha=0.6, color='green', edgecolor='black', label='Histogramme')
-                x_gauss = np.linspace(min_val, max_val, 100)
-                y_gauss = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_gauss - mu) / sigma) ** 2)
-                ax3.plot(x_gauss, y_gauss, 'r-', linewidth=2, label=f'Gaussienne (μ={mu:.1f}, σ={sigma:.1f})')
-                ax3.set_xlabel('Score Moyen')
-                ax3.set_ylabel('Densité')
-                ax3.legend()
-                ax3.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(f"{filename}.png")
+                # Pente locale sur les 100 derniers épisodes
+                n = min(100, len(scores_moyens))
+                x_recent = x_plot[-n:]
+                if np.max(x_recent) > np.min(x_recent):
+                    z_recent = np.polyfit(x_recent, scores_moyens[-n:], 1)
+                    p_recent = np.poly1d(z_recent)
+                    ax2.plot(x_recent, p_recent(x_recent), color=purple_color, linestyle="--", linewidth=1.5, label=f"Tendance Locale ({z_recent[0]:+.2f}/ep)")
+                    
+                    # Bulle d'affichage de la pente récente
+                    midpoint = x_plot[-n//2]
+                    ax2.text(midpoint, p_recent(midpoint) + (np.max(scores_moyens)*0.02 + 50), f"Pente locale: {z_recent[0]:+.2f}", 
+                             color=purple_color, fontweight="bold", fontsize=8, ha="center",
+                             bbox=dict(boxstyle="round,pad=0.2", facecolor=ax_bg, alpha=0.85, edgecolor=purple_color, linewidth=1))
+            except Exception as e:
+                print(f"⚠️ Erreur calcul de tendance : {e}")
+                
+        # Combinaison des légendes
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor=ax_bg, edgecolor=grid_color, fontsize=8)
+        
+        ax1.set_title(f"Pac-Man RL Training - {nb_parties} Épisodes | High Score: {high_score}", 
+                     fontsize=12, fontweight="bold", pad=12, color="#ffffff")
+                     
+        # --- GRAPH 2 : SURVIVABILITÉ (STEPS PAR ÉPISODE) ---
+        if has_steps:
+            ax3.set_facecolor(ax_bg)
+            ax3.plot(x_plot, nb_steps, color="#6c5ce7", alpha=0.75, linewidth=1.2, label="Longueur Épisode (Steps)")
+            ax3.set_xlabel("Épisodes", fontsize=10, fontweight="bold", labelpad=6)
+            ax3.set_ylabel("Steps / Épisode", color="#a29bfe", fontsize=10, fontweight="bold", labelpad=6)
+            ax3.tick_params(axis='y', labelcolor="#a29bfe")
+            ax3.grid(True)
+            
+            # Tendance steps
+            if len(nb_steps) > 1 and np.max(x_plot) > np.min(x_plot):
+                try:
+                    z_steps = np.polyfit(x_plot, nb_steps, 1)
+                    p_steps = np.poly1d(z_steps)
+                    ax3.plot(x_plot, p_steps(x_plot), color=orange_color, alpha=0.7, linestyle=":", linewidth=1.2, label=f"Pente: {z_steps[0]:+.1f}")
+                except:
+                    pass
+            ax3.legend(loc="upper left", facecolor=ax_bg, edgecolor=grid_color, fontsize=8)
+            
+            for spine in ['top', 'left', 'right', 'bottom']:
+                ax3.spines[spine].set_color(grid_color)
+                
+        # --- BANDEAU PREMIUM D'INFORMATIONS DE SESSION ---
+        if session_info:
+            fig.suptitle(session_info, fontsize=11, color="#ffffff", y=0.96, fontweight="bold",
+                         bbox=dict(boxstyle="round,pad=0.4", facecolor="#1e1e2f", alpha=0.95, edgecolor="#3b3b4f", linewidth=1.5))
+                         
+        # Remplacement atomique de la figure
+        tmp_filename = f"{filename}.png.tmp"
+        plt.savefig(tmp_filename, format="png", dpi=120, facecolor=fig_bg)
         plt.close()
+        
+        try:
+            if os.path.exists(tmp_filename):
+                os.replace(tmp_filename, f"{filename}.png")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du remplacement atomique de {filename}.png : {e}")
 
     @staticmethod
     def afficher_frame(frame):
@@ -549,7 +615,6 @@ class Visualizer:
 
 # ==================================================================================================
 # APPLICATION PRINCIPALE
-# ==================================================================================================
 
 class PacmanApp:
     def __init__(self):
@@ -558,9 +623,9 @@ class PacmanApp:
         self.flag_quit = False
         self.flag_create_fig = False
         self.flag_F8_pressed = False
-        self.is_normal_speed = False
-        self.training_speed = 5.0
-        self.slow_speed = 0.2
+        self.is_normal_speed = True
+        self.training_speed = 1.0
+        self.slow_speed = 1.0
         self.pending_commands = []
         
         # Web Server
@@ -776,7 +841,7 @@ class PacmanApp:
         RESUME = True # Nouvelle session "Elite" (Repart de zéro avec nouvelle architecture)
         model_type = "cnn" # "cnn" ou "mlp" - MLP recommandé pour Pacman (VRAM indices)
         N = 4 # Stack size (Standard Atari pour bien capter le mouvement)
-        NB_DE_FRAMES_STEP = 4 # Plus réactif pour ne pas rater les virages (Pacman va vite)
+        NB_DE_FRAMES_STEP = 3 # Synchronisé avec pacman_multi.py (vitesse d'apprentissage)
         TRAIN_EVERY_N_GLOBAL_STEPS = 4 # Entraîner tous les 4 steps pour ne pas tuer le CPU/GPU
         # Calcul du nombre de messages par step pour la synchro wait_for
         # wait_for (1) + get_all_data_batched(21) + execute_action(4) = 26 total lines
@@ -813,12 +878,12 @@ class PacmanApp:
             hidden_size=1024,
             output_size=4,
             learning_rate=0.0000625,
-            gamma=0.99, # Standard DeepMind
+            gamma=0.999, # Gamma=0.999 pour planification longue portée
             use_noisy=use_noisy,
             buffer_capacity=500000, 
             batch_size=256,
             min_history_size=30000, 
-            cnn_type="precise",
+            cnn_type="deepmind",
             model_type=model_type,
             epsilon_start=epsilon_start,
             epsilon_end=epsilon_end,
@@ -830,7 +895,8 @@ class PacmanApp:
             nstep=True,       
             nstep_n=3,
             prioritized_replay=True,
-            optimize_memory=True
+            optimize_memory=True,
+            mode="exploitation"
         )
 
         print(f"Configuration Input Size: {input_size} (Model: {model_type})")
@@ -997,15 +1063,23 @@ class PacmanApp:
                 
                 # Reward Shaping
                 reward = 0
-                # --- REWARD CLIPPING : DEEPMIND STANDARD (+1/-1) ---
+                # --- REWARD SHAPING : SESSION 37 ---
                 reward = 0.0
                 if new_score > score:
-                    reward = 1.0
+                    diff = new_score - score
+                    if diff >= 200:   # Fantôme mangé (200, 400, 800, 1600 pts)
+                        reward = 2.0
+                    elif diff == 50:  # Super pilule (Power Pellet)
+                        reward = 0.5
+                    elif diff in [100, 300, 500, 700, 1000]: # Fruits
+                        reward = 1.0
+                    else:             # Pastille normale
+                        reward = 0.1
                 
                 if new_lives < lives:
-                    reward = -1.0
+                    reward = -5.0 # Forte pénalité pour la perte de vie (force la survie)
                     lives = new_lives
-                # ----------------------------------------------------
+                # ------------------------------------
                 
                 score = new_score
                 sum_rewards += reward
@@ -1020,7 +1094,7 @@ class PacmanApp:
                 # Check Game Over
                 if alive == 0 and lives == 0:
                     done = True
-                    reward -= 10
+                    reward = -5.0  # Cohérent avec la pénalité de vie
                 
                 # Store & Train
                 if config.mode.lower() == "exploration":
@@ -1145,15 +1219,22 @@ class PacmanApp:
                 try: pygame.mixer.Sound("c:\\Windows\\Media\\tada.wav").play()
                 except: pass
             
+            session_info = (
+                f"Pac-Man Single Actor ({model_type.upper()}) | "
+                f"Arch: {config.cnn_type.upper() if model_type == 'cnn' else 'MLP'} | "
+                f"LR: {config.learning_rate} | Gamma: {config.gamma} | "
+                f"Buffer: {config.buffer_capacity//1000}k"
+            )
+
             if episode % 10 == 0:
                 trainer.save_model(model_filename)
-                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, os.path.join(MEDIA_DIR, "Pacman_fig"), high_score, label_curve="Sigma" if use_noisy else "Epsilon", max_scores=max_scores_hist)
+                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, os.path.join(MEDIA_DIR, "Pacman_fig"), high_score, label_curve="Sigma" if use_noisy else "Epsilon", max_scores=max_scores_hist, session_info=session_info)
             
             if episode % 100 == 0:
                 trainer.save_buffer(os.path.join(SCRIPT_DIR, "pacman.buffer"))
 
             if self.flag_create_fig:
-                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, os.path.join(MEDIA_DIR, "Pacman_fig_manual"), high_score, label_curve="Sigma" if use_noisy else "Epsilon", max_scores=max_scores_hist)
+                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, os.path.join(MEDIA_DIR, "Pacman_fig_manual"), high_score, label_curve="Sigma" if use_noisy else "Epsilon", max_scores=max_scores_hist, session_info=session_info)
                 self.flag_create_fig = False
 
         trainer.save_model(model_filename)
@@ -1165,7 +1246,7 @@ class PacmanApp:
             try:
                 shutil.copy(best_model_filename, best_with_stats)
                 print(f"{Fore.CYAN}🏆 Meilleur modèle sauvegardé sous : {best_with_stats}{Style.RESET_ALL}")
-                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, base_name, high_score, label_curve="Sigma" if use_noisy else "Epsilon", max_scores=max_scores_hist)
+                Visualizer.create_fig(episode, mean_scores, 100, epsilons, rewards_hist, steps_hist, base_name, high_score, label_curve="Sigma" if use_noisy else "Epsilon", max_scores=max_scores_hist, session_info=session_info)
                 print(f"{Fore.CYAN}📊 Figure finale sauvegardée sous : {base_name}.png{Style.RESET_ALL}")
             except Exception as e:
                 print(f"{Fore.RED}❌ Erreur copie best model: {e}{Style.RESET_ALL}")

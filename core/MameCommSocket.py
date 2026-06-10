@@ -14,7 +14,7 @@ class MameCommunicator:
         self.server_sock = None
         
         # MODE SERVEUR UNIQUE (MAME Native Socket est Client)
-        print(f"🐍 MameCommunicator: Démarrage SERVEUR sur {self.host}:{self.port}...")
+        print(f"[MAMEComm] MameCommunicator: Démarrage SERVEUR sur {self.host}:{self.port}...")
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
@@ -27,30 +27,30 @@ class MameCommunicator:
                 
         except OSError as e:
             if e.winerror == 10013: # WSAEACCES
-                print(f"❌ ERREUR CRITIQUE: Le port {self.port} est verrouillé par un autre processus (MAME ou Python).")
-            raise ConnectionRefusedError(f"❌ Erreur critique serveur : {e}")
+                print(f"[ERROR] ERREUR CRITIQUE: Le port {self.port} est verrouillé par un autre processus (MAME ou Python).")
+            raise ConnectionRefusedError(f"[ERROR] Erreur critique serveur : {e}")
         except Exception as e:
-            raise ConnectionRefusedError(f"❌ Erreur critique serveur : {e}")
+            raise ConnectionRefusedError(f"[ERROR] Erreur critique serveur : {e}")
             
         self.number_of_messages=0
-
+ 
     def accept_connection(self):
         """Attend et accepte la connexion entrante de MAME."""
         if self.sock: return # Déjà connecté
         
         try:
-            print("⏳ En attente de la connexion de MAME (Lua)...")
+            print("[WAIT] En attente de la connexion de MAME (Lua)...")
             
             # On accepte la connexion (bloquant)
             self.sock, addr = self.server_sock.accept()
-            print(f"✅ MAME connecté depuis {addr}")
+            print(f"[OK] MAME connecté depuis {addr}")
             
             # On ferme le socket d'écoute, on garde la connexion établie
             self.server_sock.close()
             self.server_sock = None
             self.sock.settimeout(None) # Mode bloquant pour les échanges
         except Exception as e:
-             raise ConnectionRefusedError(f"❌ Erreur lors de l'acceptation de la connexion : {e}")
+             raise ConnectionRefusedError(f"[ERROR] Erreur lors de l'acceptation de la connexion : {e}")
 
 
     def send_to_lua(self, messages):

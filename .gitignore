@@ -36,3 +36,4 @@ pacman/* - Copie.py
 invaders/invaders_robot.py
 invaders/* copy.py
 invaders/* - Copie.py
+pacman/pacman_multi.buffer.test
