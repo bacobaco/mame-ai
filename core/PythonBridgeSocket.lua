@@ -468,4 +468,11 @@ end
 --------------------------------------------------------------------------------
 -- Enregistrement des callbacks
 --------------------------------------------------------------------------------
-emu.register_frame(main)
+-- Compatibilité MAME >= 0.254 (add_machine_frame_notifier) et anciennes versions (register_frame)
+if emu.add_machine_frame_notifier then
+    frame_subscription = emu.add_machine_frame_notifier(main)
+elseif emu.register_frame then
+    emu.register_frame(main)
+elseif emu.register_frame_done then
+    emu.register_frame_done(main)
+end

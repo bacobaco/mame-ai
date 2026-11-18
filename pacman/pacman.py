@@ -201,53 +201,13 @@ class PacmanInterface:
 
     def get_state_cnn(self):
         """
-        Construit une image 64x64 représentant l'état du jeu.
-        - Upscaling VRAM 2x (32x32 -> 64x64) : Suffisant et beaucoup plus rapide.
-        - Positionnement précis des sprites.
-        - Optimisé pour l'architecture 'deepmind'.
-        
-        Note sur les coordonnées :
-        L'image VRAM est brute (Col, Row).
-        Les coordonnées des sprites sont mappées sur cette grille.
-        La rotation pour l'affichage est faite dans Visualizer.
-        
-        INFO CNN vs MLP :
-        - L'IA "voit" les murs et la proximité grâce aux convolutions (vision spatiale).
-        - Elle apprend plus vite les stratégies (coins, couloirs).
-        - CRITIQUE : Si cette fonction dessine les sprites avec un décalage (mauvais offset), l'IA sera aveugle/suicidaire.
+        Construit une grille sémantique multi-canaux native (4, 32, 28) en [0, 1] sans perte d'information :
+        - Canal 0 : Labyrinthe & Pastilles (Murs=0.2, Couloir vide=0.0, Pastille=0.5, Power Pellet=1.0)
+        - Canal 1 : Pac-Man uniquement (=1.0)
+        - Canal 2 : Fantômes Dangereux uniquement (=1.0) -> Séparé de Pac-Man pour éviter le masquage par MaxPool !
+        - Canal 3 : Fantômes Comestibles (Bleu solide=1.0, Clignotant=0.5)
         """
-        # 1. Lecture VRAM (Fond + Pastilles)
         response_vram = self.comm.communicate([f"read_memory_range {Memory.VRAM_START}({Memory.VRAM_LEN})"])
-        if not response_vram or not response_vram[0]:
-            grid = np.zeros((64, 56), dtype=np.float32)
-        else:
-            try:
-                # VRAM est 1024 octets (32x32 tuiles).
-                raw_list = list(map(int, response_vram[0].split(",")))
-                
-                # --- CONTRASTE AMÉLIORÉ ---
-                # MURS = 0.2 (Gris sombre)
-                grid_small = np.full((32, 28), 0.2, dtype=np.float32)
-                
-                for idx, val in enumerate(raw_list):
-                    if idx >= 1024: break
-                    r = idx % 32
-                    # CORRECTION MIROIR : On applique 27 - col pour aligner sur le hardware
-                    c = 27 - ((idx // 32) - 2)
-                    
-                    if 0 <= r < 32 and 0 <= c < 28:
-                        if val == 0x40: grid_small[r, c] = 0.4 # Chemin Vide (Gris moyen)
-                        elif val == 0x10: grid_small[r, c] = 0.6 # Pastille (Clair)
-                        elif val == 0x14: grid_small[r, c] = 0.9 # Power (Très clair)
-                
-                # --- CONTRASTE AMÉLIORÉ ---
-                # Upscaling 32x32 -> 64x64 (Facteur 2)
-                grid = np.kron(grid_small, np.ones((2, 2)))
-            except ValueError as e:
-                if self.debug >= 1: print(f"[ERROR] VRAM reshape error: {e}")
-                grid = np.zeros((64, 56), dtype=np.float32)
-
-        # 2. Lecture Positions (Sprites) pour les superposer
         response_pos = self.comm.communicate([
             f"read_memory {Memory.PACMAN_X}", f"read_memory {Memory.PACMAN_Y}",
             f"read_memory {Memory.BLINKY_X}", f"read_memory {Memory.BLINKY_Y}",
@@ -259,62 +219,127 @@ class PacmanInterface:
             f"read_memory {Memory.GHOST_STATE_INKY}",
             f"read_memory {Memory.GHOST_STATE_CLYDE}",
         ])
-        
-        if response_pos and len(response_pos) >= 14:
-            try:
-                # Correction coordonnées (Hardware Pac-Man):
-                # px (4C00) = Position Verticale (Scanline). MAME: sy = 240 - px.
-                # py (4C01) = Position Horizontale. MAME: sx = py.
-                # Formules calibrées pour grille 64x64 (Upscale 2x de 32x32 tiles)
-                
-                # AJUSTEMENT OFFSETS (Important pour l'alignement visuel F8)
-                # Offset Y = -16 pixels (-2 tuiles) car on a coupé les 2 premières colonnes de la VRAM
-                offset_x, offset_y = -4, -16 
-                
-                # Pacman (Index 0,1)
-                px, py = int(response_pos[0]), int(response_pos[1])
-                
-                # Mapping Coordonnées Sprites -> Grille 64x64 (Centrage)
-                # Les sprites font 16x16 (4x4 sur la grille). On ajoute +2 pour centrer le blob 2x2.
-                # Vertical (Row): (px + offset_x) // 4
-                pr = min(63, max(0, (px + offset_x) // 4))
-                # Horizontal (Col): Inversion Miroir (55 - ...) pour corriger la droite/gauche
-                pc = min(55, max(0, 55 - ((py + offset_y) // 4)))
-                
-                if self.debug >= 2:
-                    print(f"[CNN] Pacman Raw: ({px},{py}) -> Grid: ({pr},{pc})")
-                
-                # Dessiner un "blob" de 2x2 pour Pacman
-                # Pacman = 0.7 (Soi-même, bien visible)
-                # Correction indices : grid[row, col] -> grid[pr, pc]
-                grid[max(0, pr):min(64, pr+2), max(0, pc):min(56, pc+2)] = 0.7 
-
-                # Fantômes (Index 2-9)
-                for i in range(4):
-                    fx, fy = int(response_pos[2 + i*2]), int(response_pos[3 + i*2])
-                    state = int(response_pos[10 + i])
-                    
-                    # Détermination de la valeur sur la grille selon l'état
-                    # Danger = 0.0 (Noir)
-                    val = 0.0 
-                    
-                    if state == 1 or state == 2:
-                        val = 1.0 # Mangeable (Cible, Blanc pur)
-                    elif state >= 3: # Eaten (3) ou Eyes (4+)
-                        val = 0.4 # Neutre (Identique au couloir vide)
-
-                    fr = min(63, max(0, (fx + offset_x) // 4))
-                    fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
-                    
-                    # Dessiner un "blob" de 2x2 pour chaque fantôme
-                    grid[max(0, fr):min(64, fr+2), max(0, fc):min(56, fc+2)] = val
-                    
-            except: pass
-
-        # La grille est déjà orientée
-        grid = np.ascontiguousarray(grid)
-
+        grid = self._build_semantic_grid(
+            response_vram[0] if response_vram else "",
+            response_pos if response_pos and len(response_pos) >= 14 else None
+        )
         return grid, 0.0
+
+    @staticmethod
+    def _build_semantic_grid(vram_str, pos_list):
+        """Construit un tenseur (4, 32, 28) en [0, 1] séparant Murs/Pastilles, Pac-Man, Fantômes Mortels et Fantômes Bleus."""
+        grid = np.zeros((4, 32, 28), dtype=np.float32)
+        grid[0].fill(0.2) # Par défaut : Mur = 0.2
+        if vram_str:
+            try:
+                raw_vram = list(map(int, vram_str.split(",")))
+                for idx, val in enumerate(raw_vram):
+                    if idx >= 1024: break
+                    r = idx % 32
+                    c = 27 - ((idx // 32) - 2)
+                    if 0 <= r < 32 and 0 <= c < 28:
+                        if val == 0x40 or val == 0:
+                            grid[0, r, c] = 0.0 # Couloir vide
+                        elif val == 0x10 or val == 0xBF:
+                            grid[0, r, c] = 0.5 # Pastille normale
+                        elif val == 0x14:
+                            grid[0, r, c] = 1.0 # Power Pellet (Super pastille)
+            except Exception:
+                pass
+
+        if pos_list and len(pos_list) >= 14:
+            try:
+                px, py = int(pos_list[0]), int(pos_list[1])
+                pr = min(31, max(0, px // 8))
+                pc = (27 - (py // 8) + 2) % 28
+                grid[1, pr, pc] = 1.0 # Pac-Man seul sur le canal 1
+
+                for i in range(4):
+                    fx, fy = int(pos_list[2 + i*2]), int(pos_list[3 + i*2])
+                    state = int(pos_list[10 + i])
+                    fr = min(31, max(0, fx // 8))
+                    fc = (27 - (fy // 8) + 2) % 28
+                    if state == 0:
+                        # Fantôme mortel seul sur le canal 2 (pleine intensité 1.0, jamais masqué par Pac-Man)
+                        grid[2, fr, fc] = 1.0
+                    elif state == 1:
+                        # Fantôme bleu solide (comestible en sécurité) sur le canal 3
+                        grid[3, fr, fc] = 1.0
+                    elif state == 2:
+                        # Fantôme clignotant (fin de bonus imminente !) sur le canal 3
+                        grid[3, fr, fc] = max(grid[3, fr, fc], 0.5)
+            except Exception:
+                pass
+
+        return np.ascontiguousarray(grid)
+
+    @staticmethod
+    def build_obs_stack(frame_history):
+        """
+        Assemble les 4 frames (4, 32, 28) en un tenseur (7, 32, 28) en [0, 1] :
+        - Canal 0 : Murs & Pastilles actuels (t)
+        - Canal 1 : Pac-Man + sa traînée de mouvement (1.0 à t, 0.75 à t-1, 0.50 à t-2, 0.25 à t-3)
+        - Canaux 2..5 : Historique pur des Fantômes Dangereux (t-3, t-2, t-1, t) -> Vitesse & Direction sans masquage
+        - Canal 6 : Fantômes Comestibles actuels (t) avec distinction Bleu (1.0) vs Clignotant (0.5)
+        """
+        frames = list(frame_history)
+        pacman_trail = np.maximum.reduce([
+            frames[0][1] * 0.25,
+            frames[1][1] * 0.50,
+            frames[2][1] * 0.75,
+            frames[3][1] * 1.00,
+        ])
+        return np.stack([
+            frames[-1][0],
+            pacman_trail,
+            frames[0][2],
+            frames[1][2],
+            frames[2][2],
+            frames[3][2],
+            frames[-1][3],
+        ], axis=0).astype(np.float32)
+
+    @staticmethod
+    def compute_reward(new_score, score, new_lives, lives, pills, last_pills):
+        """
+        Calcule la récompense optimisée et l'indicateur de fin de vie (Episodic Life) :
+        - Pastille (+10 pts) : +0.1 (échelle Q apprise par pacman_best.pth en Session 43)
+        - Power Pellet (+50 pts) : +0.5
+        - Fruits (+100..+5000 pts) : +1.0
+        - Fantômes bleus (+200, +400, +800, +1600 pts) : progressif +1.0, +2.0, +3.0, +4.0
+        - Level Clear : +25.0 (forte incitation à finir le niveau plutôt que mourir sur les dernières pastilles)
+        - Perte d'une vie (Episodic Life) : -5.0 + life_lost=True (3 pastilles + mort reste négatif en N-Step=3 -> jamais de suicide)
+        - Step sans point : 0.0 (gamma=0.99 suffit à préférer les pastilles proches sans rendre les dernières pastilles négatives)
+        """
+        reward = 0.0
+        life_lost = False
+        if new_score > score:
+            diff = new_score - score
+            if diff >= 1600:
+                reward = 4.0
+            elif diff >= 800:
+                reward = 3.0
+            elif diff >= 400:
+                reward = 2.0
+            elif diff >= 200:
+                reward = 1.0
+            elif diff in [100, 300, 500, 700, 1000, 2000, 3000, 5000]:
+                reward = 1.0
+            elif diff == 50:
+                reward = 0.5
+            else:
+                reward = 0.1
+
+        # Bonus Level Clear
+        if pills < last_pills and last_pills > 200 and pills < 50 and new_lives == lives:
+            reward += 25.0
+
+        # Episodic Life : chaque perte de vie coupe le N-Step (done_transition=True) avec une pénalité anti-suicide
+        if new_lives < lives:
+            reward = -5.0
+            life_lost = True
+
+        return float(reward), life_lost
 
     def get_score_and_lives(self):
         """Récupère score, vies et statut."""
@@ -334,13 +359,10 @@ class PacmanInterface:
             return 0, 0, 0, 0
 
         try:
-            # Logique originale demandée (BCD via hex string)
             dizaines, centaines, dizaines_de_milliers = map(int, response[:3])
-            
             dizaines = int(hex(dizaines)[2:])
             centaines = int(hex(centaines)[2:])
             dizaines_de_milliers = int(hex(dizaines_de_milliers)[2:])
-            
             score = dizaines + centaines * 100 + dizaines_de_milliers * 10000
             
             lives = int(response[3])
@@ -379,7 +401,7 @@ class PacmanInterface:
         return self.comm.communicate(cmds)
 
     def process_all_data(self, response):
-        """Découpe les réponses groupées et les distribue."""
+        """Découpe les réponses groupées et construit l'état CNN multi-canaux (3, 32, 28)."""
         if not response or len(response) < 21:
             return None
         
@@ -392,45 +414,14 @@ class PacmanInterface:
             dizaines_de_milliers = int(hex(dizaines_de_milliers)[2:])
             score = dizaines + centaines * 100 + dizaines_de_milliers * 10000
             lives = int(r_score[3])
-            
-            # Utilisation de PLAYER_ALIVE (4EAE) car GAME_STATE est instable
             player_alive = int(r_score[4])
             alive_flag = 1 if player_alive != 0 else 0
-            
             pills = int(r_score[5])
-        except:
+        except Exception:
             score, lives, alive_flag, pills = 0, 0, 0, 0
 
-        # 2. Parsing CNN State
-        try:
-            raw_vram = list(map(int, response[0].split(",")))
-            grid_small = np.full((32, 28), 0.2, dtype=np.float32)
-            for idx, val in enumerate(raw_vram):
-                if idx >= 1024: break
-                r = idx % 32
-                c = 27 - ((idx // 32) - 2)
-                if 0 <= r < 32 and 0 <= c < 28:
-                    if val == 0x40: grid_small[r, c] = 0.4
-                    elif val == 0x10: grid_small[r, c] = 0.6
-                    elif val == 0x14: grid_small[r, c] = 0.9
-            grid = np.kron(grid_small, np.ones((2, 2)))
-
-            # Sprites Positions (Indices 1-14)
-            offset_x, offset_y = -4, -16 
-            px, py = int(response[1]), int(response[2])
-            pr = min(63, max(0, (px + offset_x) // 4))
-            pc = min(55, max(0, 55 - ((py + offset_y) // 4)))
-            grid[max(0, pr):min(64, pr+2), max(0, pc):min(56, pc+2)] = 0.7 
-
-            for i in range(4):
-                fx, fy = int(response[3 + i*2]), int(response[4 + i*2])
-                state = int(response[11 + i])
-                val = 0.0 if state < 1 else (1.0 if state <= 2 else 0.4)
-                fr = min(63, max(0, (fx + offset_x) // 4))
-                fc = min(55, max(0, 55 - ((fy + offset_y) // 4)))
-                grid[max(0, fr):min(64, fr+2), max(0, fc):min(56, fc+2)] = val
-        except:
-            grid = np.zeros((64, 56), dtype=np.float32)
+        # 2. Parsing CNN State (3, 32, 28)
+        grid = self._build_semantic_grid(response[0], response[1:15])
         return grid, score, lives, alive_flag, pills
 
 class StateExtractor:
@@ -594,20 +585,22 @@ class Visualizer:
     @staticmethod
     def afficher_frame(frame):
         plt.figure(figsize=(6, 6))
-        data_to_show = frame
         title = "Frame Pacman CNN Input"
-        # Si MLP (vecteur plat), on extrait la partie VRAM pour l'afficher
         if frame.ndim == 1 and frame.shape[0] >= 1024:
-             data_to_show = frame[:1024].reshape(32, 32)
-             # Rotation 90° vers la droite pour orienter correctement (comme le jeu vertical)
-             data_to_show = np.rot90(data_to_show, k=-1)
-             title = "Frame Pacman (MLP VRAM 32x32)"
-        elif frame.ndim == 2:
-             # La grille est maintenant en ordre normal (Gauche->Droite), plus besoin de flip !
-             data_to_show = frame
-        plt.imshow(data_to_show, cmap="viridis", interpolation="nearest")
+            data_to_show = frame[:1024].reshape(32, 32)
+            data_to_show = np.rot90(data_to_show, k=-1)
+            title = "Frame Pacman (MLP VRAM 32x32)"
+            plt.imshow(data_to_show, cmap="viridis", interpolation="nearest")
+            plt.colorbar()
+        elif frame.ndim == 3 and frame.shape[0] >= 4:
+            # Affichage RGB des 4 canaux sémantiques : R=Danger+PacMan, G=Murs/Pastilles+PacMan, B=Fantômes Bleus
+            rgb = np.stack([np.clip(frame[1] + frame[2], 0.0, 1.0), np.clip(frame[0] + frame[1], 0.0, 1.0), frame[3]], axis=-1)
+            title = "Frame Pacman CNN Multi-Canaux (4x32x28)"
+            plt.imshow(np.clip(rgb, 0.0, 1.0), interpolation="nearest")
+        else:
+            plt.imshow(frame, cmap="viridis", interpolation="nearest")
+            plt.colorbar()
         plt.title(title)
-        plt.colorbar()
         filename = f"pacman_frame_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         plt.savefig(filename, dpi=300, bbox_inches="tight")
         plt.close()
@@ -635,67 +628,79 @@ class PacmanApp:
         pygame.init()
         # Fenêtre large pour afficher Radar (280px) + Vision IA (280px)
         self.radar_screen = pygame.display.set_mode((560, 330))
-        pygame.display.set_caption("Pacman AI Training - Realtime Monitor (Radar | Vision IA)")
+        pygame.display.set_caption("Pacman AI Training - Realtime Monitor (Radar | Vision IA Multi-Canaux)")
         self.clock = pygame.time.Clock()
         
         pygame.mixer.init()
 
     def update_radar(self, responses, next_frame):
-        """Dessine le radar et la vision IA en temps réel."""
+        """Dessine le radar logique (gauche) et la vision IA multi-canaux (droite) en temps réel."""
         if not responses or len(responses) < 15: return
         
         # 1. Fond
         self.radar_screen.fill((20, 20, 20))
         
         # --- PARTIE GAUCHE : RADAR LOGIQUE (32x28) ---
-        # On utilise le même code que pacman_robot.py
         try:
             vram = list(map(int, responses[0].split(",")))
-            # Dessin de la grille
             for idx, val in enumerate(vram):
                 if idx >= 1024: break
-                # Mapping Midway : Column-Major
                 r = idx % 32
                 c = 27 - ((idx // 32) - 2)
                 if 0 <= r < 32 and 0 <= c < 28:
-                    if val in [64, 16, 20, 0xBF]: # Murs/Vides
+                    if val in [64, 16, 20, 0xBF]: # Couloirs/Pastilles
                         color = (0, 0, 80) if val == 64 else (10, 10, 10)
-                        if val in [16, 20]: # Pastilles
-                            pygame.draw.circle(self.radar_screen, (255, 255, 0), (c*10+5, r*10+5), 2)
+                        if val in [16, 20]:
+                            pygame.draw.circle(self.radar_screen, (255, 255, 0), (c*10+5, r*10+5), 2 if val == 16 else 4)
                         else:
                             pygame.draw.rect(self.radar_screen, color, (c*10, r*10, 9, 9))
             
-            # Sprites : Pac-Man (index 1,2) et Fantômes (index 3-10)
-            # Offset Milestone : H=+2, V=+0
-            # Pacman
             py, px = int(responses[1]), int(responses[2])
             pr, pc = py // 8, (27 - (px // 8) + 2) % 28
             pygame.draw.circle(self.radar_screen, (255, 255, 255), (pc*10+5, pr*10+5), 5)
             
-            # Fantômes
             for i in range(4):
                 gy, gx = int(responses[3+i*2]), int(responses[4+i*2])
                 state = int(responses[11+i])
                 gr, gc = gy // 8, (27 - (gx // 8) + 2) % 28
-                color = (255, 0, 0) if state == 0 else (0, 255, 255)
+                color = (255, 0, 0) if state == 0 else ((0, 255, 255) if state == 1 else (255, 180, 0))
                 pygame.draw.rect(self.radar_screen, color, (gc*10+1, gr*10+1, 8, 8))
-        except: pass
+        except Exception:
+            pass
 
-        # --- PARTIE DROITE : VISION IA (64x56) ---
-        # On dessine le tenseur 'frame' tel qu'il est envoyé au cerveau
+        # --- PARTIE DROITE : VISION IA MULTI-CANAUX (4 x 32 x 28) ---
         start_x = 280
         if next_frame is not None:
-            # next_frame est 64x56 normalisé [0,1]
-            for r in range(64):
-                for c in range(56):
-                    val = int(next_frame[r, c] * 255)
-                    # On upscale légèrement pour remplir l'espace (x4 pixels)
-                    # row * 5 pixels car 64*5 = 320px
-                    pygame.draw.rect(self.radar_screen, (val, val, val), (start_x + c*5, r*5, 5, 5))
+            if next_frame.ndim == 3 and next_frame.shape[0] >= 4:
+                for r in range(32):
+                    for c in range(28):
+                        ch0 = next_frame[0, r, c] # Murs (0.2), Pastilles (0.5), Power (1.0)
+                        ch1 = next_frame[1, r, c] # Pacman (1.0)
+                        ch2 = next_frame[2, r, c] # Fantôme mortel (1.0)
+                        ch3 = next_frame[3, r, c] # Fantôme bleu (1.0), Clignotant (0.5)
+                        if ch3 > 0.0:
+                            col = (0, 220, 255) if ch3 > 0.7 else (255, 165, 0)
+                        elif ch1 >= 0.9:
+                            col = (255, 255, 0) # Pac-Man
+                        elif ch2 > 0.0:
+                            col = (255, 40, 40) # Fantôme dangereux
+                        elif ch0 >= 0.9:
+                            col = (255, 120, 255) # Power Pellet
+                        elif ch0 >= 0.4:
+                            col = (180, 180, 120) # Pastille
+                        elif ch0 > 0.1:
+                            col = (30, 40, 90) # Mur
+                        else:
+                            col = (12, 12, 18) # Couloir vide
+                        pygame.draw.rect(self.radar_screen, col, (start_x + c*10, r*10, 9, 9))
+            elif next_frame.ndim == 2:
+                for r in range(next_frame.shape[0]):
+                    for c in range(next_frame.shape[1]):
+                        val = int(next_frame[r, c] * 255)
+                        pygame.draw.rect(self.radar_screen, (val, val, val), (start_x + c*5, r*5, 5, 5))
 
         # Séparateur
         pygame.draw.line(self.radar_screen, (100, 100, 100), (280, 0), (280, 320), 2)
-        
         pygame.display.flip()
 
     def log_results(self, nb_episodes, mean_scores, config, nb_mess, nb_step_frame, r_kill, r_step):
@@ -757,7 +762,7 @@ class PacmanApp:
             except Exception as e:
                 print(f"{Fore.RED}Erreur lancement OBS: {e}{Style.RESET_ALL}")
 
-    def launch_mame(self, visible=False):
+    def launch_mame(self, visible=True, video_driver="opengl"):
         # --- CONFIGURATION MAME ---
         MAME_BIN_PATH = "D:\\Emulateurs\\Mame Officiel\\mame.exe"
         MAME_DIR = os.path.dirname(MAME_BIN_PATH)
@@ -768,7 +773,9 @@ class PacmanApp:
             "-window", "-resolution", "448x576",
             "-skip_gameinfo",
             "-artwork_crop",
+            "-video", video_driver,
             "-sound", "none",
+            "-nowriteconfig",
             "-console",
             "-noautosave",
             "pacman",
@@ -836,7 +843,7 @@ class PacmanApp:
 
         keyboard.on_press(on_key_press)
 
-    def run(self):
+    def run(self, session=None, model_path=None, record_enabled=True, watch_speed=None, video_driver="opengl"):
         # Config
         RESUME = True # Nouvelle session "Elite" (Repart de zéro avec nouvelle architecture)
         model_type = "cnn" # "cnn" ou "mlp" - MLP recommandé pour Pacman (VRAM indices)
@@ -847,12 +854,12 @@ class PacmanApp:
         # wait_for (1) + get_all_data_batched(21) + execute_action(4) = 26 total lines
         NB_DE_DEMANDES_PAR_STEP = 25
         
-        model_filename = os.path.join(SCRIPT_DIR, f"pacman_{model_type}.pth")
+        model_filename = os.path.join(SCRIPT_DIR, "pacman_apex.pth")
         best_model_filename = os.path.join(SCRIPT_DIR, "pacman_best.pth")
         
         if model_type == "cnn":
             # (N, H, W)
-            input_size = (N, 64, 56)
+            input_size = (7, 32, 28)
         else:
             input_size = GameConstants.VRAM_SIZE + GameConstants.NUM_POSITIONS
 
@@ -878,12 +885,12 @@ class PacmanApp:
             hidden_size=1024,
             output_size=4,
             learning_rate=0.0000625,
-            gamma=0.999, # Gamma=0.999 pour planification longue portée
+            gamma=0.99, # Synchronisé avec pacman_multi.py (Rainbow Standard)
             use_noisy=use_noisy,
-            buffer_capacity=500000, 
+            buffer_capacity=10 if watch_speed is not None else 500000,
             batch_size=256,
             min_history_size=30000, 
-            cnn_type="deepmind",
+            cnn_type="precise",
             model_type=model_type,
             epsilon_start=epsilon_start,
             epsilon_end=epsilon_end,
@@ -902,7 +909,7 @@ class PacmanApp:
         print(f"Configuration Input Size: {input_size} (Model: {model_type})")
         
         # Recorder & OBS
-        record = True # Mettre à True pour enregistrer avec OBS
+        record = record_enabled
         recorder = None
         if record:
             recorder = ScreenRecorder()
@@ -914,8 +921,10 @@ class PacmanApp:
                     print(f"{Fore.RED}❌ Echec connexion OBS. Enregistrement DÉSACTIVÉ.{Style.RESET_ALL}")
                     record = False
                     recorder = None
+            else:
+                recorder.ensure_pacman_target()
 
-        self.launch_mame(visible=record)
+        self.launch_mame(visible=True, video_driver=video_driver)
         comm = MameCommunicator("localhost", 12346) # Port défini dans Lua pour Pacman
         game = PacmanInterface(comm)
         config.state_extractor = StateExtractor(game, model_type)
@@ -924,24 +933,35 @@ class PacmanApp:
         self.setup_keyboard(trainer, config, comm)
         
         # Load if exists
-        if RESUME:
-            # Priorité au chargement du BEST model pour récupérer d'une chute de performance
+        selected_model = None
+        if model_path and os.path.exists(model_path):
+            selected_model = model_path
+        elif session is not None:
+            candidates = [
+                os.path.join(SCRIPT_DIR, f"pacman_best_session{session}.pth"),
+                os.path.join(SCRIPT_DIR, f"pacman_best_{session}.pth"),
+                os.path.join(SCRIPT_DIR, f"pacman_best_4535_s{session}.pth"),
+                best_model_filename,
+            ]
+            for cand in candidates:
+                if os.path.exists(cand):
+                    selected_model = cand
+                    break
+            print(f"{Fore.CYAN}🎯 Session {session} demandée -> Modèle sélectionné : {selected_model}{Style.RESET_ALL}")
+        elif RESUME:
             if os.path.exists(best_model_filename):
-                print(f"{Fore.CYAN}♻️ RÉCUPÉRATION : Chargement du modèle BEST ({best_model_filename}) pour annuler la chute libre.{Style.RESET_ALL}")
-                trainer.load_model(best_model_filename)
+                selected_model = best_model_filename
             elif os.path.exists(model_filename):
-                trainer.load_model(model_filename)
+                selected_model = model_filename
+
+        if selected_model and os.path.exists(selected_model):
+            print(f"{Fore.GREEN}🧠 Chargement du modèle : {selected_model}{Style.RESET_ALL}")
+            trainer.load_model(selected_model)
         else:
-            # Sécurité : Archivage automatique de l'ancienne session si elle existe
-            if os.path.exists(model_filename) or os.path.exists(best_model_filename):
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                print(f"{Fore.YELLOW}⚠️ Archivage de la session précédente vers *_backup_{ts}...{Style.RESET_ALL}")
-                if os.path.exists(model_filename): shutil.move(model_filename, f"{model_filename}_backup_{ts}")
-                if os.path.exists(best_model_filename): shutil.move(best_model_filename, f"{best_model_filename}_backup_{ts}")
-                if os.path.exists("pacman.buffer"): shutil.move("pacman.buffer", f"pacman.buffer_backup_{ts}")
+            print(f"{Fore.YELLOW}⚠️ Aucun modèle pré-existant trouvé, démarrage à zéro.{Style.RESET_ALL}")
 
         buffer_filename = os.path.join(SCRIPT_DIR, "pacman.buffer")
-        if RESUME and os.path.exists(buffer_filename):
+        if RESUME and config.mode.lower() == "exploration" and os.path.exists(buffer_filename):
             trainer.load_buffer(buffer_filename)
 
         # Stats
@@ -959,11 +979,18 @@ class PacmanApp:
         time.sleep(3)  # Temps pour se préparer avant le lancement
         # Init MAME
         comm.communicate(["wait_for 3"])
-        comm.communicate([
-            f"execute throttle_rate({self.training_speed})", # Vitesse max
-            "execute throttled(0)",
-            f"frame_per_step {NB_DE_FRAMES_STEP}"
-        ])
+        if watch_speed is not None:
+            comm.communicate([
+                f"execute throttle_rate({float(watch_speed)})",
+                "execute throttled(1)",
+                f"frame_per_step {NB_DE_FRAMES_STEP}"
+            ])
+        else:
+            comm.communicate([
+                f"execute throttle_rate({self.training_speed})", # Vitesse max
+                "execute throttled(0)",
+                f"frame_per_step {NB_DE_FRAMES_STEP}"
+            ])
 
         # --- ARCHITECTURE ASYNCHRONE (ACTOR-LEARNER) ---
         self.training_active = False
@@ -1019,7 +1046,7 @@ class PacmanApp:
             
             # Stack initial
             if model_type == "cnn":
-                current_state_stack = np.stack(pacman_loop_frame_history, axis=0)
+                current_state_stack = game.build_obs_stack(pacman_loop_frame_history)
             else:
                 current_state_stack = np.concatenate(pacman_loop_frame_history)
             
@@ -1061,25 +1088,12 @@ class PacmanApp:
                     print(f"[DEBUG] Step {step} | Act: {GameConstants.ACTIONS[action]} | Score: {new_score} | Lives: {new_lives} | Alive: {alive} | Pills: {pills} | Msgs: {comm.number_of_messages}")
                 comm.number_of_messages = 0 # Reset compteur messages
                 
-                # Reward Shaping
-                reward = 0
-                # --- REWARD SHAPING : SESSION 37 ---
-                reward = 0.0
-                if new_score > score:
-                    diff = new_score - score
-                    if diff >= 200:   # Fantôme mangé (200, 400, 800, 1600 pts)
-                        reward = 2.0
-                    elif diff == 50:  # Super pilule (Power Pellet)
-                        reward = 0.5
-                    elif diff in [100, 300, 500, 700, 1000]: # Fruits
-                        reward = 1.0
-                    else:             # Pastille normale
-                        reward = 0.1
-                
-                if new_lives < lives:
-                    reward = -5.0 # Forte pénalité pour la perte de vie (force la survie)
+                # --- REWARD SHAPING & EPISODIC LIFE (Synchronisé avec pacman_multi.py) ---
+                last_pills = getattr(self, "_last_pills", pills)
+                reward, life_lost = game.compute_reward(new_score, score, new_lives, lives, pills, last_pills)
+                self._last_pills = pills
+                if life_lost:
                     lives = new_lives
-                # ------------------------------------
                 
                 score = new_score
                 sum_rewards += reward
@@ -1087,27 +1101,28 @@ class PacmanApp:
                 # Update Stack
                 pacman_loop_frame_history.append(next_frame)
                 if model_type == "cnn":
-                    next_state_stack = np.stack(pacman_loop_frame_history, axis=0)
+                    next_state_stack = game.build_obs_stack(pacman_loop_frame_history)
                 else:
                     next_state_stack = np.concatenate(pacman_loop_frame_history)
                 
-                # Check Game Over
+                # Check Game Over (Fin de la partie complète)
                 if alive == 0 and lives == 0:
                     done = True
-                    reward = -5.0  # Cohérent avec la pénalité de vie
+                
+                # Episodic Life : done_transition est True dès qu'une vie est perdue ou Game Over
+                done_transition = bool(done or life_lost)
                 
                 # Store & Train
                 if config.mode.lower() == "exploration":
                     if config.nstep:
-                        # Gestion N-Step (Rainbow) : Accumulation des récompenses sur N frames
-                        nstep_tr = trainer.nstep_wrapper.append(current_state_stack, action, reward, done, next_state_stack)
+                        nstep_tr = trainer.nstep_wrapper.append(current_state_stack, action, reward, done_transition, next_state_stack)
                         if nstep_tr:
                             trainer.replay_buffer.push(*nstep_tr)
-                        if done:
+                        if done_transition:
                             for tr in trainer.nstep_wrapper.flush():
                                 trainer.replay_buffer.push(*tr)
                     else:
-                        trainer.replay_buffer.push(current_state_stack, action, reward, next_state_stack, done)
+                        trainer.replay_buffer.push(current_state_stack, action, reward, next_state_stack, done_transition)
                 
                 current_state_stack = next_state_stack
                 trainer.update_epsilon()
@@ -1124,18 +1139,30 @@ class PacmanApp:
                 step += 1
                 nb_steps_total += 1
                 
-                # Gestion mort (attente respawn) asynchrone sécurisée
-                if alive == 0 and lives > 0:
+                # Gestion mort (attente respawn + reset propre de la pile de frames)
+                if (alive == 0 or life_lost) and lives > 0 and not done:
                     if self.debug >= 1: print("[DEBUG] Mort! alive=",alive,"-lives=",lives)
                     comm.communicate(["wait_for 6"])
                     while alive == 0:
                         for event in pygame.event.get():
                             if event.type == pygame.QUIT: self.flag_quit = True
                         data = game.get_score_and_lives()
-                        if data: _, lives, alive, _ = data
+                        if data: _, lives, alive, pills = data
                         if self.debug >= 1: print("[DEBUG] boucle while (mort) alive=",alive,"lives=",lives)
-                        if lives==0: break
-                    comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
+                        if lives == 0:
+                            done = True
+                            break
+                    if not done:
+                        self._last_pills = pills
+                        pacman_loop_frame_history.clear()
+                        for _ in range(N):
+                            s, _ = config.state_extractor()
+                            pacman_loop_frame_history.append(s)
+                        if model_type == "cnn":
+                            current_state_stack = game.build_obs_stack(pacman_loop_frame_history)
+                        else:
+                            current_state_stack = np.concatenate(pacman_loop_frame_history)
+                        comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
             if record:
                 if score > last_score:
                     time.sleep(2.0) # Attente pour capturer la fin de partie uniquement si record
@@ -1263,5 +1290,14 @@ class PacmanApp:
         self.process.terminate()
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Pac-Man Single Actor / Visualizer")
+    parser.add_argument("--session", type=int, default=None, help="Numéro de la session à charger (ex: 43)")
+    parser.add_argument("--model", type=str, default=None, help="Chemin d'un fichier de poids .pth")
+    parser.add_argument("--no-record", action="store_true", help="Désactiver l'enregistrement OBS")
+    parser.add_argument("--speed", type=float, default=None, help="Vitesse d'affichage MAME throttled (ex: 1.0 ou 1.5)")
+    parser.add_argument("--video", type=str, default="opengl", help="Driver vidéo MAME (opengl, gdi, bgfx, auto)")
+    args = parser.parse_args()
+
     app = PacmanApp()
-    app.run()
+    app.run(session=args.session, model_path=args.model, record_enabled=not args.no_record, watch_speed=args.speed, video_driver=args.video)
