@@ -1,4 +1,4 @@
-import os, time, subprocess, sys, psutil, socket, queue
+import os, time, subprocess, sys, psutil, socket, queue, random
 import threading
 from datetime import datetime
 import numpy as np
@@ -31,6 +31,11 @@ from pacman import Memory, GameConstants, PacmanInterface, StateExtractor, Visua
 NUM_ACTORS = 4
 ACTOR_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 BASE_PORT = 12347 
+MIN_LEARNING_RATE = 2.0e-5       # Plancher du LR
+ACTOR_SOCKET_TIMEOUT = 60      # s sans réponse de MAME -> liaison considérée gelée, MAME relancé
+MAX_WAIT_LOOPS = 3000          # boucles d'attente max (démarrage/réapparition) avant de déclarer MAME bloqué
+MAX_EMPTY_BATCHES = 200        # réponses vides consécutives max avant de relancer MAME
+WATCHDOG_INTERVAL = 30.0       # s entre deux vérifications des processus acteurs par le Learner
 MAME_PATH = "D:\\Emulateurs\\Mame Officiel"
 LUA_BRIDGE_PATH = os.path.join(CORE_DIR, "PythonBridgeSocket.lua").replace('\\', '/')
 MODEL_FILENAME = os.path.join(SCRIPT_DIR, "pacman_apex.pth")
@@ -62,7 +67,7 @@ def launch_mame_instance(port):
         "-window", "-resolution", "448x576",
         "-skip_gameinfo", "-artwork_crop",
         "-video", "none", "-sound", "none", "-nothrottle",
-        "-console", "-noautosave", "pacman",
+        "-console", "-noautosave", "-nowriteconfig", "pacman",
         "-autoboot_delay", "1",
         "-autoboot_script", LUA_BRIDGE_PATH,
     ]
@@ -74,141 +79,181 @@ def launch_mame_instance(port):
     return subprocess.Popen(command, cwd=MAME_PATH, startupinfo=startupinfo, env=env_vars)
 
 def actor_process(actor_id, port, config, transition_queue, score_queue, shared_weights):
-    """Processus Acteur : Joue au jeu et envoie les transitions au Learner."""
+    """Processus Acteur : Joue au jeu et envoie les transitions au Learner.
+    Auto-réparant : si la liaison Python <-> MAME est coupée ou gelée (VPN, pare-feu, crash MAME...),
+    l'acteur tue son MAME, en relance un neuf sur un nouveau port et reprend le jeu sans arrêter l'apprentissage."""
     torch.set_num_threads(1) 
     time.sleep(actor_id * 2) 
     config.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     config.buffer_capacity = 10 
+    # Cadence de rééchantillonnage NoisyNet variée par acteur (exploration multi-échelle Ape-X)
+    config.noisy_reset_interval = 6 + actor_id * 2
     
     trainer = DQNTrainer(config, silent=True)
     trainer.optimizer = None 
-    
-    comm = MameCommunicator("127.0.0.1", port, deferred_accept=True)
-    process = launch_mame_instance(port)
-    comm.accept_connection()
-    
-    game = PacmanInterface(comm)
-    local_extractor = StateExtractor(game, config.model_type)
     actor_nstep = NStepTransitionWrapper(config.nstep_n, config.gamma) if config.nstep else None
     
-    # Init MAME
-    time.sleep(5) 
-    comm.communicate(["wait_for 5"])
-    comm.communicate([
-        f"write_memory {Memory.CREDITS}(1)",
-        "execute P1_start(1)",
-        "execute throttle_rate(20.0)", 
-        "execute throttled(0)",
-        "frame_per_step 3",
-    ])
-    
     _N = config.state_history_size
-    next_weights_update = 0.0 
     NB_DE_DEMANDES_PAR_STEP = 25 
-    
-    try:
-        while True:
-            score = 0
-            comm.communicate(["wait_for 2"]) 
+    restart_count = 0
+
+    def safe_put(item):
+        try: transition_queue.put_nowait(item)
+        except queue.Full: pass
+
+    while True:
+        comm = None
+        process = None
+        try:
+            comm = MameCommunicator("127.0.0.1", port, deferred_accept=True, recv_timeout=ACTOR_SOCKET_TIMEOUT)
+            process = launch_mame_instance(port)
+            comm.accept_connection()
+            
+            game = PacmanInterface(comm)
+            local_extractor = StateExtractor(game, config.model_type)
+            
+            # Init MAME
+            time.sleep(5) 
+            comm.communicate(["wait_for 5"])
             comm.communicate([
                 f"write_memory {Memory.CREDITS}(1)",
-                "execute P1_start(1)"
+                "execute P1_start(1)",
+                "execute throttle_rate(20.0)", 
+                "execute throttled(0)",
+                "frame_per_step 3",
             ])
+            if restart_count > 0:
+                print(f"{Fore.GREEN}[Acteur {actor_id}] MAME relancé avec succès (port {port}).{Style.RESET_ALL}")
             
-            alive = 0
-            while alive == 0:
-                comm.communicate(["wait_for 6"])
-                data = game.get_score_and_lives()
-                if data: _, _, alive, _ = data
-                if alive == 0: time.sleep(0.01)
+            next_weights_update = 0.0 
             
-            local_state_history = deque(maxlen=_N)
-            for _ in range(_N):
-                frame, _ = local_extractor()
-                local_state_history.append(frame)
-            
-            current_loop_obs_stack = np.stack(local_state_history, axis=0)
-            pills_history = deque(maxlen=2)
-            lives = 3
-            done = False
-            last_pills = 0
-            step_count = 0
-            comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
-
-            while not done:
-                if time.time() > next_weights_update:
-                    if 'model' in shared_weights:
-                        try:
-                            trainer.dqn.load_state_dict(shared_weights['model'])
-                            trainer.dqn.reset_noise()
-                        except: pass
-                    next_weights_update = time.time() + 3.0
+            while True:
+                score = 0
+                comm.communicate(["wait_for 2"]) 
+                comm.communicate([
+                    f"write_memory {Memory.CREDITS}(1)",
+                    "execute P1_start(1)"
+                ])
                 
-                action = trainer.select_action(current_loop_obs_stack)
-                game.execute_action(action)
-                responses = game.get_all_data_batched()
-                batch_data = game.process_all_data(responses)
+                alive = 0
+                pills = 244
+                wait_loops = 0
+                while alive == 0:
+                    comm.communicate(["wait_for 6"])
+                    data = game.get_score_and_lives()
+                    if data: _, _, alive, pills = data
+                    if alive == 0: time.sleep(0.01)
+                    wait_loops += 1
+                    if wait_loops > MAX_WAIT_LOOPS:
+                        raise ConnectionError("la partie ne démarre plus (MAME bloqué)")
                 
-                if not batch_data: continue
-                next_frame, new_score, new_lives, alive, pills = batch_data
-                step_count += 1
+                local_state_history = deque(maxlen=_N)
+                for _ in range(_N):
+                    frame, _ = local_extractor()
+                    local_state_history.append(frame)
                 
-                # --- REWARD SHAPING COMPOSITE ---
-                reward = 0.0
-                if new_score > score:
-                    diff = new_score - score
-                    if diff >= 200:   # Fantôme mangé
-                        reward = 2.0  # Récompense accrue pour guider la chasse des fantômes bleus
-                    else:
-                        reward = 1.0  # Manger une pastille normale/super/fruit
-                
-                # Détection bonus de fin de niveau (Level Clear)
-                if pills < last_pills and last_pills > 200 and new_lives == lives:
-                    reward = 10.0  # Bonus de fin de niveau conséquent
-                
-                if new_lives < lives:
-                    reward = -1.0 # Mort = -1
-                    lives = new_lives
-                # ------------------------------------------------
-                
-                score = new_score
+                current_loop_obs_stack = game.build_obs_stack(local_state_history)
+                lives = 3
+                done = False
                 last_pills = pills
-                pills_history.append(pills)
-                local_state_history.append(next_frame)
-                next_obs_stack = np.stack(local_state_history, axis=0)
+                step_count = 0
+                empty_batches = 0
+                if actor_nstep:
+                    actor_nstep.flush()
+                comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
 
-                if alive == 0 and lives == 0:
-                    done = True
-                    reward -= 10
+                while not done:
+                    if time.time() > next_weights_update:
+                        if 'model' in shared_weights:
+                            try:
+                                trainer.dqn.load_state_dict(shared_weights['model'])
+                                trainer.dqn.reset_noise()
+                            except Exception:
+                                pass
+                        next_weights_update = time.time() + 3.0
+                    
+                    action = trainer.select_action(current_loop_obs_stack)
+                    game.execute_action(action)
+                    responses = game.get_all_data_batched()
+                    batch_data = game.process_all_data(responses)
+                    
+                    if not batch_data:
+                        empty_batches += 1
+                        if empty_batches > MAX_EMPTY_BATCHES:
+                            raise ConnectionError("flux MAME vide/désynchronisé")
+                        continue
+                    empty_batches = 0
+                    next_frame, new_score, new_lives, alive, pills = batch_data
+                    step_count += 1
+                    
+                    # --- REWARD SHAPING & EPISODIC LIFE ---
+                    reward, life_lost = game.compute_reward(new_score, score, new_lives, lives, pills, last_pills)
+                    if life_lost:
+                        lives = new_lives
+                    # --------------------------------------
+                    
+                    score = new_score
+                    last_pills = pills
+                    local_state_history.append(next_frame)
+                    next_obs_stack = game.build_obs_stack(local_state_history)
 
-                def safe_put(item):
-                    try: transition_queue.put_nowait(item)
-                    except queue.Full: pass
+                    if alive == 0 and lives == 0:
+                        done = True
 
-                if config.nstep:
-                    nstep_tr = actor_nstep.append(current_loop_obs_stack, action, reward, done, next_obs_stack)
-                    if nstep_tr: safe_put(nstep_tr)
-                    if done:
-                        for tr in actor_nstep.flush(): safe_put(tr)
-                else:
-                    safe_put((current_loop_obs_stack, action, float(reward), next_obs_stack, bool(done)))
+                    # Episodic Life : chaque perte de vie termine la trajectoire N-Step et marque done=True dans le buffer
+                    done_transition = bool(done or life_lost)
 
-                current_loop_obs_stack = next_obs_stack
+                    if config.nstep:
+                        nstep_tr = actor_nstep.append(current_loop_obs_stack, action, reward, done_transition, next_obs_stack)
+                        if nstep_tr: safe_put(nstep_tr)
+                        if done_transition:
+                            for tr in actor_nstep.flush(): safe_put(tr)
+                    else:
+                        safe_put((current_loop_obs_stack, action, float(reward), next_obs_stack, done_transition))
 
-                if alive == 0 and not done:
-                    while alive == 0:
-                        comm.communicate(["wait_for 6"])
-                        data = game.get_score_and_lives()
-                        if data: _, lives, alive, _ = data
-                        if lives == 0: break
-                    comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
+                    current_loop_obs_stack = next_obs_stack
 
-            score_queue.put((score, step_count))
-            trainer.dqn.reset_noise()
+                    if (alive == 0 or life_lost) and not done:
+                        wait_loops = 0
+                        while alive == 0:
+                            comm.communicate(["wait_for 6"])
+                            data = game.get_score_and_lives()
+                            if data: _, lives, alive, pills = data
+                            if lives == 0:
+                                done = True
+                                break
+                            wait_loops += 1
+                            if wait_loops > MAX_WAIT_LOOPS:
+                                raise ConnectionError("Pac-Man ne réapparaît plus (MAME bloqué)")
+                        if not done:
+                            # Réinitialiser proprement la pile de 4 frames après la réapparition
+                            last_pills = pills
+                            local_state_history.clear()
+                            for _ in range(_N):
+                                frame, _ = local_extractor()
+                                local_state_history.append(frame)
+                            current_loop_obs_stack = game.build_obs_stack(local_state_history)
+                            comm.communicate([f"wait_for {NB_DE_DEMANDES_PAR_STEP}"])
 
-    except Exception as e:
-        print(f"Erreur Acteur {actor_id}: {e}")
-        process.terminate()
+                score_queue.put((score, step_count))
+                trainer.dqn.reset_noise()
+
+        except Exception as e:
+            restart_count += 1
+            print(f"{Fore.RED}[Acteur {actor_id}] Liaison MAME perdue ({type(e).__name__}: {e}) "
+                  f"-> relance automatique #{restart_count} dans 5 s...{Style.RESET_ALL}")
+        finally:
+            if comm is not None:
+                comm.close()
+            if process is not None:
+                try: process.kill()
+                except Exception: pass
+
+        # La partie interrompue est abandonnée (le N-Step partiel est vidé au début de la prochaine partie)
+        time.sleep(5)
+        # Nouveau port dédié (plage séparée par acteur) pour ne jamais retomber sur un port encore à moitié fermé
+        port = find_free_port(BASE_PORT + 100 + actor_id * 20 + (restart_count % 20))
+
 
 class PacmanApeX:
     """Orchestrateur central (Learner)"""
@@ -369,6 +414,15 @@ class PacmanApeX:
                 # PARTIE 2 : Historique depuis le CSV (episodes avec scores bruts)
                 csv_count = 0
                 if csv_eps:
+                    # Correction automatique si l'axe X du CSV a reculé suite à un arrêt brutal (ex: 6876 -> 6002)
+                    fixed_eps = []
+                    offset = 0
+                    for i, ep in enumerate(csv_eps):
+                        if i > 0 and (ep + offset) <= fixed_eps[-1]:
+                            offset = fixed_eps[-1] - ep + 1
+                        fixed_eps.append(ep + offset)
+                    csv_eps = fixed_eps
+
                     self.raw_scores_loaded = csv_scores
                     self.raw_steps_loaded = csv_steps
                     for i in range(len(csv_eps)):
@@ -380,9 +434,13 @@ class PacmanApeX:
                         self.mean_steps_history.append(mean_st)
                         self.sigma_history.append(csv_sigmas[i])
                         csv_count += 1
+
+                # Synchroniser global_episodes avec le dernier épisode réel du CSV/Log
+                if self.episodes_history and self.episodes_history[-1] > self.global_episodes:
+                    self.global_episodes = int(self.episodes_history[-1])
                 
                 total = log_count + csv_count
-                print(f"{Fore.GREEN}[REPRISE] Historique complet restaure : {total} points ({log_count} depuis log + {csv_count} depuis CSV){Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[REPRISE] Historique complet restaure : {total} points ({log_count} depuis log + {csv_count} depuis CSV) -> Ep {self.global_episodes}{Style.RESET_ALL}")
                 
             else:
                 print(f"{Fore.YELLOW}[WARNING] Session {session_id} introuvable dans {RESULTS_FILENAME}. Demarrage de la session {session_id} a zero.{Style.RESET_ALL}")
@@ -437,9 +495,9 @@ class PacmanApeX:
 
     def run(self):
         config = TrainingConfig(
-            input_size=(4, 64, 56), state_history_size=4,
+            input_size=(7, 32, 28), state_history_size=4,
             hidden_layers=2, hidden_size=1024, output_size=4, # Rainbow Config
-            learning_rate=0.0000625, gamma=0.99, # Standard DM / Rainbow
+            learning_rate=0.00003125, gamma=0.995, # LR stable # Horizon allongé (0.99 -> 0.995) : valorise les dernières pastilles lointaines
             use_noisy=True, epsilon_start=0.01, epsilon_end=0.01, epsilon_linear=0.0,
             epsilon_decay=0.0, epsilon_add=0.0,
             buffer_capacity=500_000, batch_size=256, min_history_size=30000,
@@ -450,6 +508,8 @@ class PacmanApeX:
 
         kill_existing_mame()
         trainer = DQNTrainer(config)
+        if hasattr(trainer, 'scheduler'):
+            trainer.scheduler.min_lrs = [MIN_LEARNING_RATE] * len(trainer.optimizer.param_groups)
         
         # Priorité au chargement
         model_to_load = None
@@ -491,7 +551,10 @@ class PacmanApeX:
         last_log_time = time.time()
         last_steps = self.global_steps
         last_fill_log = -1
+        last_watchdog = time.time()
+        actor_respawns = 0
         last_results_save = (self.global_episodes // 1000) * 1000 # Tracker pour les 1000 épisodes
+        next_lr_check = self.global_episodes + 500 # Vérification du LR basée sur les épisodes (et non en secondes)
 
         if self.global_episodes > 0:
             if not self.mean_scores_history:
@@ -572,7 +635,10 @@ class PacmanApeX:
                         last_steps = self.global_steps
                     
                     if time.time() - last_weight_sync > 3.0:
-                        shared_weights['model'] = {k: v.cpu() for k, v in trainer.dqn.state_dict().items()}
+                        try:
+                            shared_weights['model'] = {k: v.cpu() for k, v in trainer.dqn.state_dict().items()}
+                        except (BrokenPipeError, EOFError, OSError):
+                            raise KeyboardInterrupt
                         last_weight_sync = time.time()
 
                 if time.time() - last_log_time > 5.0:
@@ -618,7 +684,9 @@ class PacmanApeX:
                                           self.max_score, label_curve=label_curve, x_axis=self.episodes_history, session_info=session_info)
                     
                     last_log_time = time.time()
-                    trainer.update_learning_rate(mean_sc)
+                    if self.global_episodes >= next_lr_check:
+                        next_lr_check = self.global_episodes + 500
+                        trainer.update_learning_rate(mean_sc)
                     
                     if mean_sc > (self.best_mean_recorded + 10.0) and len(collection_score) >= 200:
                         self.best_mean_recorded = mean_sc
@@ -626,10 +694,10 @@ class PacmanApeX:
                         trainer.save_model(BEST_MODEL_FILENAME)
                         print(f"{Fore.YELLOW}[RECORD] Nouveau record de moyenne : {self.best_mean_recorded:.1f} !{Style.RESET_ALL}")
 
-                    # --- PLATEAU RESET (RELANCER L'EXPLORATION SANS DÉTRUIRE LES SIGMAS) ---
+                    # --- PLATEAU RESET (RELANCER L'EXPLORATION SANS TOUCHER AUX SIGMAS) ---
                     if self.global_episodes - last_record_episode > 1500:
-                        print(f"\n{Fore.YELLOW}[PLATEAU] Plateau détecté @ Ep {self.global_episodes}. Reset noise (sans toucher sigma).{Style.RESET_ALL}")
-                        trainer.dqn.reset_noise()  # Re-sample epsilon noise, préserve les sigma appris
+                        print(f"\n{Fore.YELLOW}[PLATEAU] Plateau détecté @ Ep {self.global_episodes}. Reset noise (préserve les sigmas appris).{Style.RESET_ALL}")
+                        trainer.dqn.reset_noise()  # Re-sample epsilon noise uniquement, SANS écraser sigma
                         last_record_episode = self.global_episodes
 
                     # --- SAUVEGARDE PÉRIODIQUE (TOUS LES 1000 ÉPISODES) ---
@@ -644,6 +712,19 @@ class PacmanApeX:
                         trainer.save_model(MODEL_FILENAME)
                         trainer.save_buffer(BUFFER_FILENAME)
                         print(f"{Fore.GREEN}[SAUVEGARDE] Session {self.experiment_id} mise à jour & sauvegardée (Eps {self.global_episodes}){Style.RESET_ALL}")
+
+                # --- WATCHDOG : relance d'un acteur mort (filet de sécurité si l'auto-réparation échoue) ---
+                if time.time() - last_watchdog > WATCHDOG_INTERVAL:
+                    last_watchdog = time.time()
+                    for i, p in enumerate(processes):
+                        if not p.is_alive():
+                            actor_respawns += 1
+                            new_port = find_free_port(BASE_PORT + 500 + i * 20 + (actor_respawns % 20))
+                            print(f"{Fore.RED}[WATCHDOG] Acteur {i} mort -> relance sur le port {new_port}...{Style.RESET_ALL}")
+                            np_ = mp.Process(target=actor_process, args=(i, new_port, config, transition_queue, score_queue, shared_weights))
+                            np_.daemon = True
+                            np_.start()
+                            processes[i] = np_
 
                 # --- DETECTION DE L'ARRET GRACIEUX ---
                 if os.path.exists("stop.flag") or os.path.exists(os.path.join(SCRIPT_DIR, "stop.flag")):
@@ -668,7 +749,7 @@ class PacmanApeX:
 
                 time.sleep(0.01)
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, BrokenPipeError, EOFError):
             print(f"\n{Fore.RED}[ARRET] Arrêt...{Style.RESET_ALL}")
             trainer.save_model(MODEL_FILENAME)
             trainer.save_buffer(BUFFER_FILENAME)

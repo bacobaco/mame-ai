@@ -721,6 +721,7 @@ class InvadersApp:
             "-sound", "none",
             "-console",
             "-noautosave",
+            "-nowriteconfig",
             "invaders",
             "-autoboot_delay", "1",
             "-autoboot_script", LUA_SCRIPT_PATH,

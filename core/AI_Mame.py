@@ -266,6 +266,7 @@ class TrainingConfig:
     state_extractor: callable = None  # Fonction d'extraction d'état
     mode: str = "exploration"  # "exploration" pour l'entraînement, "exploitation" (inference) pour la phase finale
     optimize_memory: bool = False # ✅ Nouvelle option pour contrôler la compression uint8
+    noisy_reset_interval: int = 8 # 🆕 Intervalle (en steps acteur) entre deux rééchantillonnages NoisyNet pour éviter l'oscillation sur place
 
     def clone(self):
         """Retourne une copie profonde de la configuration."""
@@ -674,10 +675,9 @@ class DQNModel(nn.Module):
 
             elif config.cnn_type == "precise":
                 self.encoder = nn.Sequential(
-                    nn.Conv2d(channels, 32, kernel_size=5, stride=1, padding=2),
-                    nn.GroupNorm(8, 32), # ✅ Remplacement BatchNorm -> GroupNorm (Plus stable pour RL)
+                    nn.Conv2d(channels, 32, kernel_size=3, stride=1, padding=1),
+                    nn.GroupNorm(8, 32), # ✅ Pas de MaxPool au 1er bloc pour préserver les couloirs d'1 case (32x28)
                     nn.ReLU(),
-                    nn.MaxPool2d(kernel_size=2),
 
                     nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
                     nn.GroupNorm(8, 64), # ✅ Remplacement BatchNorm -> GroupNorm
@@ -824,7 +824,7 @@ class DQNTrainer:
         self.optimizer = optim.AdamW(self.dqn.parameters(), lr=config.learning_rate, eps=1.5e-4, weight_decay=1e-5)
         
         # Scheduler : Réduit le Learning Rate si le score stagne (Patience augmentée pour PacMan)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=1000, min_lr=1e-5)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=250, threshold=1e-2, threshold_mode='rel', min_lr=1e-5)
 
         self.criterion = nn.MSELoss()
         # Utilisation du ReplayBuffer classique (échantillonnage uniforme)
@@ -891,7 +891,9 @@ class DQNTrainer:
             # If in exploitation mode, self.dqn is .eval(), NoisyLinear uses mu_weights.
             if self.config.mode == "exploration": # Implies self.dqn.training is True
                 with self.model_lock:
-                    self.dqn.reset_noise() # Sample new noise for this action selection
+                    reset_interval = max(1, getattr(self.config, "noisy_reset_interval", 8))
+                    if self.actor_steps % reset_interval == 1 or reset_interval == 1:
+                        self.dqn.reset_noise() # Sample new noise coherently across several steps
 
                 # Plus besoin de hacker le mode eval() car on utilise LayerNorm au lieu de BatchNorm
                 with torch.no_grad():

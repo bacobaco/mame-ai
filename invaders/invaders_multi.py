@@ -57,7 +57,7 @@ def launch_mame_instance(port):
         "-window", "-resolution", "448x576",
         "-skip_gameinfo", "-artwork_crop",
         "-video", "none", "-sound", "none", "-nothrottle",
-        "-console", "-noautosave", "invaders",
+        "-console", "-noautosave", "-nowriteconfig", "invaders",
         "-autoboot_delay", "1",
         "-autoboot_script", LUA_BRIDGE_PATH,
     ]

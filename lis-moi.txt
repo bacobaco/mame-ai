@@ -2,12 +2,12 @@ Ran command: `python .\safe_backup.py`
 
 Bravo, la sauvegarde est réussie (**28 fichiers stratégiques** sont maintenant à l'abri !). 🥂
 
-Pour recréer ton environnement Python (`venv`) dans le nouveau dossier `C:\Users\baco\Documents\Python\MameAI\`, voici la marche à suivre. C'est très simple grâce au fichier `requirements.txt` que nous avons copié dans le dossier `core`.
+Pour recréer ton environnement Python (`venv`) dans le nouveau dossier `C:\Users\baco\Documents\Dev\MameAI\`, voici la marche à suivre. C'est très simple grâce au fichier `requirements.txt` que nous avons copié dans le dossier `core`.
 
 ### 🛠️ Procédure pour recréer l'environnement :
 
 1.  **Ouvre un terminal** (PowerShell ou CMD) dans ton nouveau dossier :
-    `cd C:\Users\baco\Documents\Python\MameAI`
+    `cd C:\Users\baco\Documents\Dev\MameAI`
 
 2.  **Crée l'environnement virtuel** :
     `python -m venv venv`
