@@ -42,6 +42,8 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
 - **Multi-Agent (Ape-X Distributed)**:
   ```bash
   python pacman/pacman_multi.py
+  # Or resume a specific session:
+  python pacman/pacman_multi.py --session 38
   ```
   *Note: Launches multiple MAME actors (configured in script) reporting to a central Learner.*
 
@@ -54,6 +56,41 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
   ```bash
   python invaders/invaders_multi.py
   ```
+
+### ⌨️ Runtime Controls & Shortcuts
+
+#### 🕹️ Live Keyboard Controls (Single-Agent: `pacman.py` & `invaders.py`)
+> [!NOTE]
+> Shortcuts require holding **`Ctrl + Shift + [Function Key]`** while the terminal or game window has focus.
+
+| Shortcut | Description | Action |
+| :--- | :--- | :--- |
+| **`Ctrl + Shift + F2`** | **Exit & Save** | Triggers graceful quit, saves final model checkpoint (`.pth`) and buffer (`.buffer`). |
+| **`Ctrl + Shift + F3`** | **Disable Debug** | Resets debug output level to 0. |
+| **`Ctrl + Shift + F4`** | **Debug Level** | Cycles/increments debug verbosity (0 to 3). |
+| **`Ctrl + Shift + F5`** | **Speed Toggle** | Toggles MAME throttle between slow/normal viewing speed and maximum training speed. |
+| **`Ctrl + Shift + F6`** | **Speed Adjust** | Increments the slow viewing speed (+0.1). |
+| **`Ctrl + Shift + F7`** | **Generate Figure** | Instantly exports an updated training performance graph to `media/`. |
+| **`Ctrl + Shift + F8`** | **Inspect Frame** | Saves and displays the current frame/state tensor as seen by the AI (CNN/VRAM vision). |
+| **`Ctrl + Shift + F9`** | **Mode Toggle** | Switches between `exploration` (training) and `exploitation` (deterministic evaluation). |
+| **`Ctrl + Shift + F10`**| **Increase Epsilon** | Increases exploration rate $\epsilon$ (+0.1, up to 1.0). |
+| **`Ctrl + Shift + F11`**| **Decrease Epsilon** | Decreases exploration rate $\epsilon$ (-0.1, down to $\epsilon_{end}$). |
+| **`Ctrl + Shift + F12`**| **Lua Debug** | Toggles verbose Lua socket bridge logs (`debug on/off`). |
+
+#### 🛑 Graceful Shutdown & Multi-Actor Controls (`pacman_multi.py`)
+- **`stop.flag` Mechanism**: 
+  Create an empty file named `stop.flag` at the project root or in `pacman/` (e.g. `New-Item stop.flag` in PowerShell or `touch stop.flag`).
+  - Automatically caught by the main learner loop.
+  - Safely saves the neural network (`pacman_apex.pth`), replay buffer (`pacman_multi.buffer`), and archives session results in `resultats_pacman.txt`.
+  - Terminates MAME instances and cleans up the flag file automatically.
+- **`Ctrl + C` (KeyboardInterrupt)**: Emergency fallback that also saves model and buffer before exiting.
+
+#### 🌐 Real-Time Web Monitoring
+- While training, a live web dashboard runs automatically on port 5000:
+  - **Local**: `http://127.0.0.1:5000/`
+  - **LAN / Mobile**: `http://<YOUR_LOCAL_IP>:5000/`
+  - Automatically auto-refreshes the latest performance graph every 30 seconds.
+
 
 ---
 
@@ -81,12 +118,97 @@ Mame-AI is an artificial intelligence training framework designed for classic ar
 ### 🎮 Utilisation
 
 #### 🟡 Pac-Man
-- **Agent Solo (DQN Standard)** : `python pacman/pacman.py`
-- **Multi-Agent (Ape-X Distribué)** : `python pacman/pacman_multi.py`
+- **Agent Solo (DQN Standard)** :
+  ```bash
+  python pacman/pacman.py
+  ```
+- **Multi-Agent (Ape-X Distribué)** :
+  ```bash
+  python pacman/pacman_multi.py
+  # Ou pour reprendre une session existante :
+  python pacman/pacman_multi.py --session 38
+  ```
 
 #### 👾 Space Invaders
-- **Agent Solo (DQN Standard)** : `python invaders/invaders.py`
-- **Multi-Agent (Ape-X Distribué)** : `python invaders/invaders_multi.py`
+- **Agent Solo (DQN Standard)** :
+  ```bash
+  python invaders/invaders.py
+  ```
+- **Multi-Agent (Ape-X Distribué)** :
+  ```bash
+  python invaders/invaders_multi.py
+  ```
+
+### ⌨️ Raccourcis Clavier & Contrôles d'Entraînement
+
+#### 🕹️ Raccourcis en Direct (Mode Solo : `pacman.py` & `invaders.py`)
+> [!NOTE]
+> Les raccourcis s'activent en maintenant **`Ctrl + Shift + [Touche Fonction]`** pendant que la console ou la fenêtre du jeu est active.
+
+| Raccourci | Fonction | Description |
+| :--- | :--- | :--- |
+| **`Ctrl + Shift + F2`** | **Quitter & Sauvegarder** | Déclenche un arrêt propre, sauvegarde le modèle final (`.pth`) et le buffer (`.buffer`). |
+| **`Ctrl + Shift + F3`** | **Désactiver Debug** | Remet le niveau d'affichage de debug à 0. |
+| **`Ctrl + Shift + F4`** | **Niveau Debug** | Fait défiler/augmente la verbosité du debug (niveaux 0 à 3). |
+| **`Ctrl + Shift + F5`** | **Bascule Vitesse** | Bascule la vitesse MAME entre affichage fluide/lent et vitesse maximale d'entraînement. |
+| **`Ctrl + Shift + F6`** | **Ajuster Vitesse Lente**| Augmente par palier la vitesse lente (+0.1). |
+| **`Ctrl + Shift + F7`** | **Générer Graphique** | Exporte immédiatement une nouvelle figure de performance dans le dossier `media/`. |
+| **`Ctrl + Shift + F8`** | **Inspecter la Frame** | Sauvegarde et affiche l'état/tenseur actuel perçu par l'IA (vision CNN / VRAM). |
+| **`Ctrl + Shift + F9`** | **Bascule Mode** | Alterne entre `exploration` (apprentissage avec bruit) et `exploitation` (inférence pure). |
+| **`Ctrl + Shift + F10`**| **Augmenter Epsilon** | Augmente le taux d'exploration $\epsilon$ (+0.1, max 1.0). |
+| **`Ctrl + Shift + F11`**| **Diminuer Epsilon** | Réduit le taux d'exploration $\epsilon$ (-0.1, min $\epsilon_{end}$). |
+| **`Ctrl + Shift + F12`**| **Debug Socket Lua** | Active/désactive les logs détaillés du pont Lua (`debug on/off`). |
+
+#### 🛑 Arrêt Gracieux & Contrôles Multi-Acteurs (`pacman_multi.py`)
+- **Mécanisme `stop.flag`** :
+  Créez un fichier vide nommé exactement **`stop.flag`** à la racine du projet ou dans le dossier `pacman/` (ex : `New-Item stop.flag` dans PowerShell ou `touch stop.flag`).
+  - Détecté automatiquement par la boucle principale du Learner.
+  - Sauvegarde en toute sécurité le réseau de neurones (`pacman_apex.pth`), le buffer de rejeu (`pacman_multi.buffer`), et archive les résultats dans `resultats_pacman.txt`.
+  - Ferme les instances MAME et supprime automatiquement le fichier `stop.flag`.
+- **`Ctrl + C` (Interruption clavier)** : Arrêt de secours qui sauvegarde également les poids et le buffer avant de quitter.
+
+#### 🌐 Tableau de Bord Web en Temps Réel
+- Lors de l'entraînement, un serveur Flask est automatiquement lancé sur le port 5000 :
+  - **Localement** : `http://127.0.0.1:5000/`
+  - **Réseau Local / Mobile** : `http://<VOTRE_IP_LOCALE>:5000/`
+  - Rafraîchit automatiquement le dernier graphique de progression toutes les 30 secondes.
+
+---
+
+---
+
+## 🏆 Pac-Man 30K Grandmaster (Pure Neural AI — ~28k–32k pts)
+
+### 🧠 Architecture & Principe (`pacman/pacman_30k.py` & `pacman/pacman_30k.pth`)
+- **Inférence 100 % neuronale (`frame_per_step 1`, 60 Hz)** : aucun script ni masque d'action au runtime — chaque frame passe uniquement dans `PixelGrandmasterCNN(...).argmax()`.
+- **Capteur spatial 12 canaux (`MazeSensor11`)** :
+  - 7 canaux temporels MAME (`build_obs_stack` : murs/pastilles, traînée Pac-Man, 4 frames fantômes dangereux, fantômes bleus).
+  - 5 champs continus (`danger_field`, BFS hyperbolique `1/(1 + 0.22*d)` vers les pastilles `64`, super-pastilles `48`, fantômes bleus `32`, et champ `safe_reach` avec marge de sécurité `lead >= 3` sur `22` tuiles).
+- **Tête hybride (`PixelGrandmasterCNN`)** : tronc ResNet dilaté (`48` canaux), patch égocentrique `11x11` centré sur Pac-Man + 4 rayons directionnels (`L, R, U, D`), contexte global `4x4`, et `31` scalaires invariants (alignement sous-tuile, vitesses relatives, états des fantômes, niveau, timer bleu).
+- **Entraînement (`SoftQ-V3`)** : 24 époques sur `708 007` frames sans pauses (parties teacher `28k–34.5k` + DAgger on-policy + Elite Self-Play `28.5k–33.3k` + `NegDeath`), combinant Cross-Entropy, distillation Soft-Q 4 actions (`tau=14`), barrière/marge anti-pièges (`unsafe4`) et anti-murs (`wall4`), avec pondération renforcée aux carrefours dangereux et en fin de niveau (`<= 18` pastilles).
+- **Scores observés en évaluation déterministe (6 profils)** : `[3230, 4180, 27230, 27180, 32080, 32280]` (`max=32 280` pts, `7` niveaux complétés, validation inédite `98.26%`).
+
+### ▶️ Rejouer / Observer une partie à ~28 000+ pts (`pacman/watch_30k.py`)
+Utilisez toujours l'environnement virtuel du projet (`.\venv\Scripts\python.exe`) depuis la racine `MameAI` :
+
+```powershell
+# Regarder en temps réel (60 FPS) et s'arrêter dès qu'une partie atteint >= 28 000 pts :
+.\venv\Scripts\python.exe pacman\watch_30k.py --model pacman\pacman_30k.pth --speed 1.0 --target 28000
+
+# En vitesse x2 ou vitesse max (0) :
+.\venv\Scripts\python.exe pacman\watch_30k.py --model pacman\pacman_30k.pth --speed 2.0 --target 28000
+.\venv\Scripts\python.exe pacman\watch_30k.py --model pacman\pacman_30k.pth --speed 0 --target 28000
+```
+
+Vous pouvez aussi lancer le lecteur standard avec vue radar/capteurs Pygame :
+```powershell
+.\venv\Scripts\python.exe pacman\pacman_30k.py --model pacman\pacman_30k.pth --speed 1.0
+```
+
+### ⚙️ Pourquoi `watch_30k.py` reproduit fidèlement les parties ~28k–32k
+1. **Timing MAME fidèle (`-sound none`)** : désactiver le son évite la synchronisation audio Windows et conserve la cadence exacte à 60 Hz (`frame_per_step 1`).
+2. **Capture propre après respawn (`wait_for 25` puis 4 frames)** : après chaque démarrage, passage de niveau ou perte de vie, l'historique des 4 frames est rempli *après* l'animation d'attente afin de ne pas injecter de frames figées dans le CNN.
+3. **Décalage d'ouverture déterministe (`candidate_workers = [2, 2, 4, 3, 5, 1]`)** : reproduit le décalage initial exact `shift_steps = (wid * 3) % 15` (`0` = gauche, `1` = droite) utilisé lors des évaluations déterministes (les profils `2, 3, 4, 5` atteignent régulièrement `27k–32k` en pur `argmax`).
 
 ---
 
